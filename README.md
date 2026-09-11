@@ -50,7 +50,7 @@
 
 扫描结果支持入口 / 出口地区、ASN / 运营商、Cloudflare 机房、测速与 IP 纯净度等维度筛选与分析。
 
-![结果分析与测速](docs/images/scan-results.png)
+![扫描结果分析与测速](docs/images/scan-results.png)
 
 ## 设计与安全原则
 
@@ -186,16 +186,6 @@ EDT_REMOTE_TIMEOUT=15
 ```
 
 运行时数据与密钥文件不应进入 Git。
-
-## 公开发布前检查
-
-在公开部署截图、Issues、日志或配置前，请确认已经移除：
-
-- 真实 VPS IP 与主机名
-- 自有域名与内部 URL
-- API Token、Tunnel Token、Cookie Secret
-- 登录账号与密码
-- 个人邮箱等不希望公开的信息
 
 ## 许可证
 
