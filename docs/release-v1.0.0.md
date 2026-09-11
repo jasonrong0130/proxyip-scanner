@@ -49,4 +49,6 @@ bash update.sh
 
 ## License
 
-MIT License.
+ProxyIP Scanner Personal Non-Commercial License 1.0.
+
+Personal, non-commercial use is free. Commercial use requires separate prior written authorization. This includes paid or monetized SaaS/API/hosting, paid deployment or support, commercial product integration, and use for for-profit business operations. See `LICENSE` for the complete terms.
