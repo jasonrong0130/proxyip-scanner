@@ -1,0 +1,39 @@
+name: EDT Full HTTP Probe Check
+
+on:
+  push:
+    branches:
+      - feature/edt-runtime-full-http
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Validate Python
+        run: python -m py_compile app.py edt_runtime.py
+      - name: Validate probe defaults and packet builder
+        env:
+          EDT_RUNTIME_WORKER_URL: https://vpn.example.com
+          EDT_PROBE_UUID: e485a89a-e4a4-481d-b245-a2e02ae83c74
+        run: |
+          python - <<'PY'
+          from edt_runtime import load_edt_runtime_config, _vless_request
+          cfg = load_edt_runtime_config()
+          assert cfg.configured
+          assert cfg.target_host == 'www.google.com'
+          assert cfg.target_sni == 'www.google.com'
+          assert cfg.target_path == '/generate_204'
+          assert cfg.expected_status == 204
+          packet = _vless_request(cfg.user_id, cfg.target_host, cfg.target_port, b'hello')
+          assert packet[0] == 0 and len(packet) > 24
+          print('EDT full HTTP probe validation passed')
+          PY

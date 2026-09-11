@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>ProxyIP 公开候选源</title>
+<style>
+:root{color-scheme:light;--bg:#f4f6fa;--card:#fff;--text:#0f172a;--muted:#64748b;--line:#e2e8f0;--ok:#0f8a5f;--bad:#c2414b;--accent:#171a21}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}.wrap{max-width:1360px;margin:auto;padding:26px 22px 40px}.top{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:18px}.title{font-size:23px;font-weight:800}.sub{color:var(--muted);font-size:12px;margin-top:3px}.actions{display:flex;gap:8px;flex-wrap:wrap}.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px;margin-bottom:14px;box-shadow:0 10px 28px rgba(15,23,42,.055)}button{border:0;border-radius:10px;padding:10px 14px;background:var(--accent);color:#fff;font-weight:700;cursor:pointer}button.secondary{background:#eef2f6;color:#263244;border:1px solid #e2e8f0}button:disabled{opacity:.45;cursor:not-allowed}.grid{display:grid;grid-template-columns:repeat(12,1fr);gap:12px}.c12{grid-column:span 12}.c6{grid-column:span 6}.c4{grid-column:span 4}.c3{grid-column:span 3}label{display:block;color:#536176;font-size:12px;font-weight:700;margin-bottom:7px}input,select,textarea{width:100%;border:1px solid #d8dee8;border-radius:10px;padding:10px 11px;background:#fff;outline:none}textarea{min-height:220px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;line-height:1.6}.checks{display:flex;gap:12px;flex-wrap:wrap}.checks label{display:flex;align-items:center;gap:7px;margin:0;padding:9px 11px;border:1px solid var(--line);border-radius:10px;background:#fafbfd;color:#334155}.checks input{width:auto}.note{font-size:12px;color:var(--muted)}.stats{display:grid;grid-template-columns:repeat(6,1fr);gap:9px}.stat{border:1px solid var(--line);border-radius:12px;padding:12px;background:#fafbfd}.stat b{display:block;font-size:21px}.stat span{color:var(--muted);font-size:11px}.ok{color:var(--ok);font-weight:750}.bad{color:var(--bad);font-weight:750}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.tablewrap{overflow:auto;border:1px solid var(--line);border-radius:12px}table{border-collapse:collapse;width:100%;min-width:1080px}th,td{padding:9px 10px;border-bottom:1px solid #edf0f3;text-align:left;white-space:nowrap}th{background:#f8fafc;font-size:11px;color:#5d6b7f}.status{padding:9px 11px;border-radius:10px;background:#f8fafc;border:1px solid var(--line);font-size:12px}.source-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.pill{display:inline-flex;padding:4px 8px;border-radius:999px;background:#eef2f6;color:#475569;font-size:11px;font-weight:700}.hidden{display:none!important}@media(max-width:850px){.c6,.c4,.c3{grid-column:span 12}.stats{grid-template-columns:repeat(2,1fr)}.wrap{padding:16px 12px 28px}.top{align-items:flex-start;flex-direction:column}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div><div class="title">ProxyIP 公开候选源</div><div class="sub">只从明确公开用于 ProxyIP 的来源取候选，再交给现有 EDT 真连接检测筛选。</div></div>
+    <div class="actions"><button class="secondary" onclick="location.href='/'">返回主扫描器</button></div>
+  </div>
+
+  <div id="authWarn" class="card hidden"><div class="bad">尚未登录 Scanner。</div><div class="note" style="margin-top:6px">请先返回主扫描器登录，再打开本页。</div></div>
+
+  <div id="main" class="hidden">
+    <div class="card">
+      <div class="grid">
+        <div class="c3"><label>地区</label><select id="region"><option value="HK">香港 HK</option><option value="JP">日本 JP</option><option value="SG">新加坡 SG</option><option value="KR">韩国 KR</option><option value="US">美国 US</option><option value="DE">德国 DE</option><option value="ALL">全球 ALL</option></select></div>
+        <div class="c3"><label>最多导入</label><select id="limit"><option value="200">200</option><option value="500" selected>500</option><option value="1000">1000</option><option value="0">全部</option></select></div>
+        <div class="c3"><label>快速检测并发</label><select id="concurrency"><option>20</option><option selected>50</option><option>100</option><option>200</option></select></div>
+        <div class="c3"><label>端口策略</label><select id="portPolicy"><option value="keep" selected>保留来源端口</option><option value="443">只保留 443</option><option value="force443">统一改成 443</option></select></div>
+        <div class="c6"><label>检测 SNI</label><input id="sni" placeholder="vpn.rongxiaofeng.top" /></div>
+        <div class="c6"><label>来源</label><div class="checks"><label><input id="srcCountry" type="checkbox" checked /> NiREvil 地区公开列表</label><label><input id="srcDaily" type="checkbox" /> NiREvil 每日全球列表</label><label><input id="srcCmliu" type="checkbox" checked /> CMliu 公开 ProxyIP 域名</label></div></div>
+        <div class="c12"><div class="actions"><button id="fetchBtn">获取候选</button><button id="scanBtn" disabled>开始 EDT 真连接筛选</button><button id="copyCandidatesBtn" class="secondary" disabled>复制候选</button></div></div>
+        <div class="c12"><div id="sourceStatus" class="status">等待获取候选。</div></div>
+        <div class="c12"><label>候选列表</label><textarea id="candidates" placeholder="候选会显示在这里；超过 200 条时只预览前 200 条。"></textarea><div class="note">实际扫描使用完整候选集合，不受预览 200 条限制。第三方公开列表只作为候选来源，最终以本站 EDT 真连接结果为准。</div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="stats"><div class="stat"><b id="stTotal">0</b><span>总数</span></div><div class="stat"><b id="stDone">0</b><span>一级已检测</span></div><div class="stat"><b id="stFinal">0</b><span>最终可用</span></div><div class="stat"><b id="stRuntime">0/0</b><span>EDT 真连接</span></div><div class="stat"><b id="stState">-</b><span>任务状态</span></div><div class="stat"><b id="stJob">-</b><span>任务 ID</span></div></div>
+      <div class="actions" style="margin-top:12px"><button id="stopBtn" class="secondary" disabled>停止任务</button><button id="copyGoodBtn" class="secondary" disabled>复制最终可用</button></div>
+    </div>
+
+    <div class="card">
+      <div class="source-row" style="margin-bottom:10px"><b>最终结果</b><span class="pill">只展示最终可用和明确失败</span></div>
+      <div class="tablewrap"><table><thead><tr><th>#</th><th>ProxyIP</th><th>最终</th><th>EDT</th><th>CF</th><th>TCP</th><th>TLS</th><th>出口地区</th><th>机房</th><th>错误</th></tr></thead><tbody id="tbody"></tbody></table></div>
+    </div>
+  </div>
+</div>
+<script>
+let csrf='',cfg=null,allCandidates=[],jobId=null,timer=null,current=null;
+const $=id=>document.getElementById(id);
+const RAW_BASE='https://raw.githubusercontent.com/NiREvil/vless/main/sub/';
+const CMLIU={ALL:'proxyip.cmliussss.net',HK:'ProxyIP.HK.CMLiussss.net',JP:'ProxyIP.JP.CMLiussss.net',SG:'ProxyIP.SG.CMLiussss.net',KR:'ProxyIP.KR.CMLiussss.net',US:'ProxyIP.US.CMLiussss.net',DE:'ProxyIP.DE.CMLiussss.net'};
+function esc(v){return String(v??'').replace(/[&<>"']/g,s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]))}
+async function api(path,opt={}){const headers={'Content-Type':'application/json',...(opt.headers||{})};if(csrf&&opt.method&&opt.method!=='GET')headers['x-csrf-token']=csrf;const r=await fetch(path,{credentials:'same-origin',...opt,headers});const text=await r.text();let data={};try{data=text?JSON.parse(text):{}}catch{data={detail:text}}if(!r.ok)throw new Error(data.detail||('HTTP '+r.status));return data}
+function validIp(ip){const p=String(ip).split('.');return p.length===4&&p.every(x=>/^\d{1,3}$/.test(x)&&Number(x)>=0&&Number(x)<=255)}
+function normalize(ip,port){if(!validIp(ip))return null;port=Number(port||443);if(port<1||port>65535)return null;return ip+':'+port}
+function applyPortPolicy(list){const mode=$('portPolicy').value;return list.map(x=>{const m=x.match(/^(\d+(?:\.\d+){3}):(\d+)$/);if(!m)return x;if(mode==='443'&&m[2]!=='443')return null;if(mode==='force443')return m[1]+':443';return x}).filter(Boolean)}
+function dedupe(list){const s=new Set(),out=[];for(const x of list){const k=String(x).trim().toLowerCase();if(!k||s.has(k))continue;s.add(k);out.push(String(x).trim())}return out}
+async function fetchText(url){const r=await fetch(url,{cache:'no-store'});if(!r.ok)throw new Error('来源请求失败 HTTP '+r.status);return await r.text()}
+function parseCountry(text){const out=[];for(const line of text.split(/\r?\n/)){const m=line.trim().match(/^(\d{1,3}(?:\.\d{1,3}){3})\s+(\d{1,5})$/);if(!m)continue;const n=normalize(m[1],m[2]);if(n)out.push(n)}return out}
+function parseDaily(text){const out=[];const re=/<pre><code>(\d{1,3}(?:\.\d{1,3}){3})<\/code><\/pre>/g;let m;while((m=re.exec(text))){const n=normalize(m[1],443);if(n)out.push(n)}return out}
+async function resolveCmliu(host){try{const u='https://cloudflare-dns.com/dns-query?name='+encodeURIComponent(host)+'&type=A';const r=await fetch(u,{headers:{Accept:'application/dns-json'},cache:'no-store'});if(!r.ok)throw new Error('DoH '+r.status);const d=await r.json();const ips=(d.Answer||[]).map(x=>String(x.data||'').trim()).filter(validIp).map(x=>x+':443');return ips.length?ips:[host+':443']}catch{return [host+':443']}}
+async function loadCandidates(){const region=$('region').value,parts=[],errors=[];$('fetchBtn').disabled=true;$('scanBtn').disabled=true;$('sourceStatus').textContent='正在读取公开来源…';try{
+  if($('srcCountry').checked&&region!=='ALL'){try{const t=await fetchText(RAW_BASE+'country_proxies/'+region+'.txt');const v=parseCountry(t);parts.push(...v);$('sourceStatus').textContent='已读取地区列表 '+v.length+' 条…'}catch(e){errors.push('地区列表：'+e.message)}}
+  if($('srcDaily').checked||region==='ALL'){try{const t=await fetchText(RAW_BASE+'ProxyIP-Daily.md');const v=parseDaily(t);parts.push(...v);$('sourceStatus').textContent='已读取每日列表 '+v.length+' 条…'}catch(e){errors.push('每日列表：'+e.message)}}
+  if($('srcCmliu').checked){try{const host=CMLIU[region]||CMLIU.ALL;const v=await resolveCmliu(host);parts.push(...v)}catch(e){errors.push('CMliu：'+e.message)}}
+  let list=dedupe(applyPortPolicy(parts));const limit=Number($('limit').value||0);if(limit>0)list=list.slice(0,limit);allCandidates=list;const box=$('candidates');box.value=list.length<=200?list.join('\n'):list.slice(0,200).join('\n')+'\n\n… 仅预览前 200 条，实际共 '+list.length+' 条';$('scanBtn').disabled=!list.length;$('copyCandidatesBtn').disabled=!list.length;$('sourceStatus').innerHTML='获取完成：<b>'+list.length+'</b> 条候选'+(errors.length?'；<span class="bad">'+esc(errors.join('；'))+'</span>':'')+'.';
+}catch(e){allCandidates=[];$('sourceStatus').innerHTML='<span class="bad">获取失败：'+esc(e.message)+'</span>'}finally{$('fetchBtn').disabled=false}}
+async function startScan(){if(!allCandidates.length)return;const sni=$('sni').value.trim();if(!sni)return alert('请填写检测 SNI');$('scanBtn').disabled=true;try{const body={targets:allCandidates.join('\n'),probe_sni:sni,probe_path:cfg.default_probe_path||'/cdn-cgi/trace',generic_sni:'',expect_cloudflare:true,check_concurrency:Number($('concurrency').value),timeout:7,edt_runtime:{enabled:true},speed:{enabled:false}};const d=await api('/api/jobs',{method:'POST',body:JSON.stringify(body)});jobId=d.id;$('stJob').textContent=jobId;pollStart()}catch(e){alert('创建任务失败：'+e.message);$('scanBtn').disabled=false}}
+function pollStart(){clearInterval(timer);poll();timer=setInterval(poll,1000)}
+async function poll(){if(!jobId)return;try{current=await api('/api/jobs/'+jobId);render();if(['completed','cancelled','interrupted'].includes(current.state)){clearInterval(timer);timer=null;$('scanBtn').disabled=false}}catch(e){clearInterval(timer);timer=null;$('scanBtn').disabled=false;alert('读取任务失败：'+e.message)}}
+function mark(v){return v===true?'<span class="ok">✓</span>':v===false?'<span class="bad">×</span>':'-'}
+function render(){const d=current||{};$('stTotal').textContent=d.total||0;$('stDone').textContent=d.completed||0;$('stFinal').textContent=d.final_available??d.available??0;$('stRuntime').textContent=(d.runtime_completed||0)+'/'+(d.runtime_total||0);$('stState').textContent=d.state||'-';$('stopBtn').disabled=!['queued','checking','runtime_checking','speeding'].includes(d.state);const good=(d.results||[]).filter(r=>r.final_available===true);$('copyGoodBtn').disabled=!good.length;const rows=(d.results||[]).filter(r=>r.final_available!==null&&r.final_available!==undefined).slice(0,500);$('tbody').innerHTML=rows.map((r,i)=>'<tr><td>'+(i+1)+'</td><td class="mono">'+esc(r.candidate||r.input)+'</td><td>'+mark(r.final_available)+'</td><td>'+mark(r.edt_available)+'</td><td>'+mark(r.cloudflare_reached)+'</td><td>'+esc(r.tcp_ms??'-')+'</td><td>'+esc(r.tls_ms??'-')+'</td><td>'+esc(r.country||'-')+'</td><td>'+esc(r.colo||'-')+'</td><td class="'+(r.error?'bad':'')+'">'+esc(r.error||'-')+'</td></tr>').join('')}
+async function copyText(text){try{await navigator.clipboard.writeText(text);return true}catch{const ta=document.createElement('textarea');ta.value=text;document.body.appendChild(ta);ta.select();const ok=document.execCommand('copy');ta.remove();return ok}}
+$('fetchBtn').onclick=loadCandidates;$('scanBtn').onclick=startScan;$('copyCandidatesBtn').onclick=async()=>{if(await copyText(allCandidates.join('\n')))alert('已复制 '+allCandidates.length+' 条候选')};$('copyGoodBtn').onclick=async()=>{const good=(current?.results||[]).filter(r=>r.final_available===true).map(r=>r.candidate);if(await copyText(good.join('\n')))alert('已复制 '+good.length+' 条最终可用 ProxyIP')};$('stopBtn').onclick=async()=>{if(!jobId)return;try{await api('/api/jobs/'+jobId+'/cancel',{method:'POST'});$('stopBtn').disabled=true}catch(e){alert(e.message)}};
+(async function boot(){try{const me=await api('/api/auth/me',{method:'GET'});csrf=me.csrf||'';cfg=await api('/api/config',{method:'GET'});$('sni').value=cfg.default_probe_sni||'';$('main').classList.remove('hidden');const p=new URLSearchParams(location.search),r=(p.get('region')||'HK').toUpperCase();if([...$('region').options].some(o=>o.value===r))$('region').value=r}catch(e){$('authWarn').classList.remove('hidden')}})();
+</script>
+</body>
+</html>
