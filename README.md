@@ -126,7 +126,7 @@ cd /opt/proxyip-scanner
 bash install-cloudflare-tunnel.sh
 ```
 
-Tunnel Token 仅应保存在服务器本机环境文件中，不要提交到 Git。
+Tunnel Token 仅应保存在服务器本机环境文件中
 
 ## EDT 集成
 
@@ -173,7 +173,7 @@ EDT_REMOTE_TOKEN=<REMOTE_EDT_API_TOKEN>
 EDT_REMOTE_TIMEOUT=15
 ```
 
-远程地址建议使用 HTTPS。`EDT_REMOTE_TOKEN` 只应保存在 `/etc/proxyip-scanner.env`，不要写入仓库。
+远程地址建议使用 HTTPS。`EDT_REMOTE_TOKEN` 只应保存在 `/etc/proxyip-scanner.env`
 
 ## 数据与配置位置
 
@@ -185,7 +185,6 @@ EDT_REMOTE_TIMEOUT=15
 /etc/proxyip-scanner-tunnel.env   Tunnel Token（如启用）
 ```
 
-运行时数据与密钥文件不应进入 Git。
 
 ## 许可证
 
