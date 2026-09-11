@@ -38,3 +38,8 @@ First public release candidate.
 - Default bind address is `127.0.0.1:8788`
 - Private, loopback and reserved scan targets are rejected
 - Public README and source tree no longer contain deployment-specific VPS/domain information
+
+### License
+
+- Public source is licensed for personal, non-commercial use only under the ProxyIP Scanner Personal Non-Commercial License 1.0.
+- Commercial use, paid hosting/SaaS, paid deployment/support, commercial product integration, and use for for-profit business operations require separate written authorization.
