@@ -4,7 +4,7 @@ All notable changes to ProxyIP Scanner are documented here.
 
 ## [1.0.0] - 2026-09-11
 
-First public release candidate.
+First public release.
 
 ### Added
 
@@ -37,7 +37,7 @@ First public release candidate.
 - Runtime secrets remain outside Git
 - Default bind address is `127.0.0.1:8788`
 - Private, loopback and reserved scan targets are rejected
-- Public README and source tree no longer contain deployment-specific VPS/domain information
+- Public README and source tree do not contain deployment-specific VPS/domain information
 
 ### License
 
