@@ -10,7 +10,9 @@
 - [更新记录](CHANGELOG.md)
 - [安全策略](SECURITY.md)
 - [v1.0.0 Release Notes](docs/release-v1.0.0.md)
-- [MIT License](LICENSE)
+- [个人非商业许可](LICENSE)
+
+> **许可提示：** 本项目源码公开供个人免费、非商业使用。未经单独书面授权，禁止任何商业使用，包括收费 SaaS / API / 托管服务、收费部署或维护、商业产品集成，以及公司、工作室或其他营利主体的内部业务使用。详见 [LICENSE](LICENSE)。本项目不是 OSI 定义的开源软件。
 
 ## 功能特性
 
@@ -185,7 +187,7 @@ EDT_REMOTE_TIMEOUT=15
 
 运行时数据与密钥文件不应进入 Git。
 
-## 开源发布前检查
+## 公开发布前检查
 
 在公开部署截图、Issues、日志或配置前，请确认已经移除：
 
@@ -194,6 +196,10 @@ EDT_REMOTE_TIMEOUT=15
 - API Token、Tunnel Token、Cookie Secret
 - 登录账号与密码
 - 个人邮箱等不希望公开的信息
+
+## 许可证
+
+本项目采用 [ProxyIP Scanner Personal Non-Commercial License 1.0](LICENSE)。个人非商业使用免费；任何商业使用必须事先取得单独书面授权。
 
 ## 免责声明
 
