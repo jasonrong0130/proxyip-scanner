@@ -1,21 +1,49 @@
-MIT License
+ProxyIP Scanner Personal Non-Commercial License 1.0
 
-Copyright (c) 2026 ProxyIP Scanner contributors
+Copyright (c) 2026 ProxyIP Scanner. All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+1. PERSONAL NON-COMMERCIAL LICENSE
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+Subject to the terms of this License, an individual natural person is granted a limited, worldwide, non-exclusive, non-transferable, non-sublicensable, royalty-free license to download, use, run, study, and modify the Software solely for that person's own personal, non-commercial purposes.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+2. PERMITTED SHARING
+
+You may share unmodified or modified source code only for non-commercial purposes, provided that:
+
+(a) this License and all copyright notices remain intact;
+(b) the source code is made available under this same License;
+(c) you clearly identify material modifications you made; and
+(d) you do not charge any fee or receive any commercial benefit for the Software or the sharing, hosting, support, deployment, maintenance, or distribution of it.
+
+3. COMMERCIAL USE PROHIBITED WITHOUT SEPARATE AUTHORIZATION
+
+Any commercial use requires prior written authorization from the copyright holder or project maintainer. Prohibited commercial use includes, without limitation:
+
+(a) selling, licensing, renting, or monetizing the Software or a modified version;
+(b) offering the Software, or functionality substantially derived from it, as a paid or monetized SaaS, hosted service, API, managed service, subscription, or other online service;
+(c) charging for installation, deployment, configuration, maintenance, support, consulting, or other services whose material purpose is to provide or operate the Software;
+(d) incorporating or bundling the Software into a commercial product or paid service;
+(e) using the Software for or on behalf of a company, partnership, studio, sole proprietorship, commercial organization, or other for-profit activity, including internal business operations; or
+(f) using the Software in an activity intended to generate revenue, fees, commercial advantage, or other monetary compensation.
+
+4. NO TRADEMARK LICENSE
+
+This License does not grant permission to use project names, logos, trademarks, or branding except as reasonably necessary to identify the original source of the Software.
+
+5. OWNERSHIP
+
+The Software is licensed, not sold. Except for the limited rights expressly granted by this License, all rights are reserved. Modifications do not remove or reduce the obligations imposed by this License on portions derived from the Software.
+
+6. TERMINATION
+
+Your rights under this License terminate automatically if you violate any term of this License. Upon termination, you must stop using and distributing the Software. The copyright holder may reinstate rights only by written permission.
+
+7. NO WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND NON-INFRINGEMENT. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR ITS USE.
+
+8. COMMERCIAL LICENSING
+
+Commercial licenses or other exceptions may be granted separately in writing by the copyright holder or project maintainer. No commercial rights are granted by this public License.
+
+By using, modifying, or distributing the Software, you agree to the terms of this License.
