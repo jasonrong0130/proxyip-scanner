@@ -19,19 +19,26 @@ jobs:
         run: |
           python -m py_compile app.py edt_runtime.py
           bash -n install.sh update.sh uninstall.sh install-cloudflare-tunnel.sh
-      - name: Validate candidate console JavaScript
+      - name: Validate web console JavaScript
         run: |
           python - <<'PY'
           from pathlib import Path
           import re
-          html = Path('static/candidates.html').read_text(encoding='utf-8')
-          scripts = re.findall(r'<script>(.*?)</script>', html, re.S)
-          assert scripts, 'candidate console script missing'
-          Path('/tmp/candidates.js').write_text('\n'.join(scripts), encoding='utf-8')
+          for source, target in [
+              ('static/index.html', '/tmp/index.js'),
+              ('static/candidates.html', '/tmp/candidates.js'),
+          ]:
+              html = Path(source).read_text(encoding='utf-8')
+              scripts = re.findall(r'<script>(.*?)</script>', html, re.S)
+              assert scripts, f'{source} script missing'
+              Path(target).write_text('\n'.join(scripts), encoding='utf-8')
           PY
+          node --check /tmp/index.js
           node --check /tmp/candidates.js
       - name: Import application
         run: PROXY_SCANNER_DATA_DIR=/tmp/proxyip-scanner-ci ADMIN_PASSWORD_HASH=x SESSION_SECRET=x python -c "import app; print(app.APP_NAME, app.APP_VERSION)"
+      - name: Run lifecycle tests
+        run: PROXY_SCANNER_DATA_DIR=/tmp/proxyip-scanner-tests ADMIN_PASSWORD_HASH=x SESSION_SECRET=x python -m unittest discover -s tests -v
       - name: Validate annotated ProxyIP imports
         run: |
           PROXY_SCANNER_DATA_DIR=/tmp/proxyip-scanner-ci ADMIN_PASSWORD_HASH=x SESSION_SECRET=x python - <<'PY'

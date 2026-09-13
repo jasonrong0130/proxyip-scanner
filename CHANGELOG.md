@@ -2,6 +2,27 @@
 
 All notable changes to ProxyIP Scanner are documented here.
 
+## [1.1.0] - 2026-09-13
+
+### Added
+
+- Per-job deletion directly from task history
+- One-click cleanup for all inactive history jobs
+- Destructive cleanup removes task JSON, metadata and checkpoint files together
+
+### Fixed
+
+- Primary scan cancellation now waits for the cancelled asyncio task to finish
+- Cancelled and interrupted primary scans release full in-memory target/result payloads
+- EDT-stage cancellation no longer leaves hydrated jobs resident in the global job registry
+- Unified history purge removes job registry references and associated runtime task references
+
+### Improved
+
+- Completed/cancelled/interrupted jobs are reduced to lightweight lazy stubs after execution
+- CI now validates the main web console JavaScript and job lifecycle cleanup tests
+- History cleanup keeps currently running or paused jobs intact
+
 ## [1.0.0] - 2026-09-11
 
 First public release.

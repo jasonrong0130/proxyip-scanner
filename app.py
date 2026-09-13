@@ -33,7 +33,7 @@ STATIC_DIR = APP_DIR / "static"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 APP_NAME = "ProxyIP Scanner"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 CHECK_CONCURRENCY_OPTIONS = (20, 50, 100, 200)
 CLOUDFLARE_HTTPS_PORTS = (443, 2053, 2083, 2087, 2096, 8443)
 DEFAULT_SCAN_PORTS = (443,)
@@ -753,12 +753,94 @@ def read_job_stub(path: Path) -> Optional[dict]:
     return stub
 
 
-def _delete_job_files(job_id: str) -> None:
+def _delete_job_files(job_id: str) -> int:
+    deleted = 0
     for path in (job_path(job_id), job_meta_path(job_id), checkpoint_path(job_id)):
         try:
-            path.unlink(missing_ok=True)
+            if path.exists():
+                path.unlink()
+                deleted += 1
         except Exception:
             pass
+    return deleted
+
+
+def _job_runtime_is_active(job_id: str, job: Optional[dict] = None) -> bool:
+    job = job if job is not None else JOBS.get(job_id)
+    if job is not None and str(job.get("state") or "") in JOB_ACTIVE_STATES:
+        return True
+    tasks = [
+        job.get("_task") if isinstance(job, dict) else None,
+        POST_SPEED_TASKS.get(job_id),
+        PURITY_TASKS.get(job_id),
+    ]
+    return any(task is not None and not task.done() for task in tasks)
+
+
+def purge_job(job_id: str, *, collect: bool = True) -> dict:
+    job_id = str(job_id or "").strip()
+    job = JOBS.get(job_id)
+    if _job_runtime_is_active(job_id, job):
+        return {"deleted": False, "reason": "active", "deleted_files": 0}
+
+    job = JOBS.pop(job_id, None)
+    POST_SPEED_TASKS.pop(job_id, None)
+    PURITY_TASKS.pop(job_id, None)
+    deleted_files = _delete_job_files(job_id)
+
+    if isinstance(job, dict):
+        job.clear()
+
+    if collect:
+        gc.collect()
+
+    return {
+        "deleted": job is not None or deleted_files > 0,
+        "reason": None,
+        "deleted_files": deleted_files,
+    }
+
+
+def _job_ids_on_disk() -> set[str]:
+    job_ids: set[str] = set()
+    patterns = (
+        re.compile(r"^([0-9a-f]{12})\.json$"),
+        re.compile(r"^([0-9a-f]{12})\.meta\.json$"),
+        re.compile(r"^([0-9a-f]{12})\.checkpoint\.jsonl$"),
+    )
+    try:
+        for path in DATA_DIR.iterdir():
+            for pattern in patterns:
+                match = pattern.fullmatch(path.name)
+                if match:
+                    job_ids.add(match.group(1))
+                    break
+    except Exception:
+        pass
+    return job_ids
+
+
+def purge_history_jobs() -> dict:
+    deleted = 0
+    deleted_files = 0
+    skipped_active = 0
+    job_ids = set(JOBS) | _job_ids_on_disk()
+
+    for job_id in sorted(job_ids):
+        result = purge_job(job_id, collect=False)
+        if result.get("reason") == "active":
+            skipped_active += 1
+            continue
+        if result.get("deleted"):
+            deleted += 1
+            deleted_files += int(result.get("deleted_files") or 0)
+
+    gc.collect()
+    return {
+        "deleted": deleted,
+        "deleted_files": deleted_files,
+        "skipped_active": skipped_active,
+    }
 
 
 def _job_meta_is_expired(job_id: str, ts: Optional[float] = None) -> bool:
@@ -789,9 +871,9 @@ def cleanup_expired_jobs() -> int:
             finished_at = 0
         if finished_at <= 0 or finished_at >= cutoff:
             continue
-        JOBS.pop(job_id, None)
-        _delete_job_files(job_id)
-        removed += 1
+        result = purge_job(job_id, collect=False)
+        if result.get("deleted"):
+            removed += 1
     if removed:
         gc.collect()
     return removed
@@ -849,6 +931,8 @@ def release_job_memory(job: dict) -> None:
         persist_job_meta(job)
     except Exception:
         pass
+    job.pop("_task", None)
+    job.pop("_checkpoint_buffer", None)
     stub = {key: job.get(key) for key in JOB_META_FIELDS}
     stub["_lazy"] = True
     stub["_lazy_path"] = str(job_path(str(job.get("id") or "")))
@@ -859,7 +943,7 @@ def release_job_memory(job: dict) -> None:
 load_job_index()
 
 
-async def run_job(job: dict) -> None:
+async def _run_job_impl(job: dict) -> None:
     settings = job["settings"]
     targets = job["targets"]
     concurrency = settings["check_concurrency"]
@@ -1066,6 +1150,42 @@ async def run_job(job: dict) -> None:
     job["finished_at"] = now()
     compact_job_checkpoint(job)
     release_job_memory(job)
+
+
+async def run_job(job: dict) -> None:
+    try:
+        await _run_job_impl(job)
+    except asyncio.CancelledError:
+        job["cancel_requested"] = True
+        job["state"] = "cancelled"
+        job["finished_at"] = job.get("finished_at") or now()
+        try:
+            compact_job_checkpoint(job)
+        except Exception:
+            try:
+                persist_job(job)
+            except Exception:
+                pass
+        raise
+    except Exception:
+        previous_state = str(job.get("state") or "")
+        if previous_state in {"queued", "checking", "runtime_checking", "speeding", "purity_checking"}:
+            job["interrupted_stage"] = previous_state
+        job["state"] = "interrupted"
+        job["resume_available"] = previous_state in {"queued", "checking"} and int(job.get("total") or 0) > 0
+        job["finished_at"] = now()
+        try:
+            compact_job_checkpoint(job)
+        except Exception:
+            try:
+                persist_job(job)
+            except Exception:
+                pass
+        raise
+    finally:
+        job.pop("_task", None)
+        if str(job.get("state") or "") not in JOB_ACTIVE_STATES:
+            release_job_memory(job)
 
 
 def clean_import_target(raw: Any) -> str:
@@ -2125,27 +2245,38 @@ async def cancel_job(job_id: str, request: Request) -> dict:
         task = job.get("_task")
         if task is not None and not task.done():
             task.cancel()
-        return {"ok": True, "id": job_id, "state": job.get("state"), "restartable": False}
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+        else:
+            compact_job_checkpoint(job)
+            release_job_memory(job)
+        return {"ok": True, "id": job_id, "state": "cancelled", "restartable": False}
 
     return {"ok": True, "id": job_id, "state": job.get("state"), "restartable": True}
+
+
+@app.delete("/api/jobs")
+async def delete_job_history(request: Request) -> dict:
+    payload = require_web_session(request)
+    require_csrf(request, payload)
+    result = purge_history_jobs()
+    return {"ok": True, **result}
 
 
 @app.delete("/api/jobs/{job_id}")
 async def delete_job(job_id: str, request: Request) -> dict:
     payload = require_web_session(request)
     require_csrf(request, payload)
-    job = JOBS.get(job_id)
-    if not job:
+    if job_id not in JOBS and not any(path.exists() for path in (job_path(job_id), job_meta_path(job_id), checkpoint_path(job_id))):
         raise HTTPException(status_code=404, detail="job not found")
-    if job.get("state") in {"queued", "checking", "runtime_checking", "speeding", "purity_checking", "speed_paused", "purity_paused"}:
+    result = purge_job(job_id)
+    if result.get("reason") == "active":
         raise HTTPException(status_code=409, detail="stop the job before deleting it")
-    JOBS.pop(job_id, None)
-    for path in (job_path(job_id), job_meta_path(job_id), checkpoint_path(job_id)):
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
-    return {"ok": True}
+    return {"ok": True, "id": job_id, **result}
 
 
 @app.get("/api/jobs/{job_id}/export.csv")

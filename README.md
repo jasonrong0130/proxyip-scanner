@@ -4,11 +4,12 @@
 
 项目以 **VPS 直连扫描** 为核心，不依赖 Cloudflare Worker raw TCP；默认仅监听本机 `127.0.0.1:8788`，适合通过 Cloudflare Tunnel、反向代理或其他受控入口访问。
 
-当前公开版本：**v1.0.0**
+当前公开版本：**v1.1.0**
 
 - [完整安装说明](INSTALL.md)
 - [更新记录](CHANGELOG.md)
 - [安全策略](SECURITY.md)
+- [v1.1.0 Release Notes](docs/release-v1.1.0.md)
 - [v1.0.0 Release Notes](docs/release-v1.0.0.md)
 - [个人非商业许可](LICENSE)
 
@@ -26,7 +27,7 @@
 - 可选测速、重复测速与并发控制
 - IP 地理信息与纯净度辅助判断
 - 候选池、区域 / ASN / ISP 等筛选能力
-- 任务暂停、恢复、中断恢复、取消与历史记录
+- 任务暂停、恢复、中断恢复、取消、历史单项删除与一键清空
 - 大任务低内存处理与 7 天默认历史保留
 - CSV / TXT 导出
 - 管理员登录、HttpOnly / Secure / SameSite Cookie、CSRF 与登录失败限速
