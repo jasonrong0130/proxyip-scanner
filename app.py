@@ -709,30 +709,49 @@ def read_job_stub(path: Path) -> Optional[dict]:
     job_id = path.stem
     meta_path = job_meta_path(job_id)
     stub: dict = {}
+    had_meta = False
+    meta_changed = False
     try:
         if meta_path.exists():
             raw = json.loads(meta_path.read_text(encoding="utf-8"))
             if isinstance(raw, dict):
                 stub = {key: raw.get(key) for key in JOB_META_FIELDS}
-        # Old large jobs put targets/results before some summary scalars. A 512 KiB
-        # prefix could therefore create a stale 0/0 meta file. Repair missing total
-        # by streaming the JSON, without hydrating the full results array.
+                had_meta = True
+        # Old large jobs put targets/results before some summary scalars. Repair
+        # missing metadata by streaming only scalar fields from the snapshot.
         if not stub or int(stub.get("total") or 0) <= 0:
             scanned = _scan_job_scalars(path, JOB_META_FIELDS)
             for key, value in scanned.items():
                 if stub.get(key) is None or key in {"total", "created_at", "started_at", "candidate_region"}:
-                    stub[key] = value
+                    if stub.get(key) != value:
+                        stub[key] = value
+                        meta_changed = True
     except Exception:
         return None
     if str(stub.get("id") or job_id) != job_id:
         return None
     stub["id"] = job_id
     total = int(stub.get("total") or 0)
-    checkpoint = _checkpoint_summary(job_id, total)
-    if checkpoint:
-        # The journal is newer than the last full snapshot after an OOM/crash.
-        stub.update(checkpoint)
     old_state = str(stub.get("state") or "")
+    interrupted_stage = str(stub.get("interrupted_stage") or "")
+
+    # Stable completed/cancelled history already has authoritative metadata.
+    # Replaying a large append-only checkpoint for every historical job at
+    # process startup can delay Uvicorn from binding its socket for many seconds.
+    # Only crash/interruption recovery needs the expensive checkpoint summary.
+    needs_checkpoint_recovery = (
+        not had_meta
+        or old_state in {"queued", "checking", "runtime_checking", "speeding", "purity_checking"}
+        or (old_state == "interrupted" and interrupted_stage in {"queued", "checking"})
+    )
+    if needs_checkpoint_recovery and total > 0:
+        checkpoint = _checkpoint_summary(job_id, total)
+        if checkpoint:
+            for key, value in checkpoint.items():
+                if stub.get(key) != value:
+                    stub[key] = value
+                    meta_changed = True
+
     if old_state in {"queued", "checking", "runtime_checking", "speeding", "purity_checking"}:
         stub["interrupted_stage"] = old_state
         stub["state"] = "interrupted"
@@ -740,16 +759,22 @@ def read_job_stub(path: Path) -> Optional[dict]:
         # transition, resume still needs to run so run_job can enter EDT.
         stub["resume_available"] = old_state in {"checking", "queued"} and total > 0
         stub["finished_at"] = stub.get("finished_at") or now()
-    elif old_state == "interrupted" and str(stub.get("interrupted_stage") or "") in {"checking", "queued"} and total > 0:
-        # Repair stale meta files created by the first low-memory release (0/0,
-        # resume_available=false) once the checkpoint proves the task is recoverable.
-        stub["resume_available"] = True
+        meta_changed = True
+    elif old_state == "interrupted" and interrupted_stage in {"checking", "queued"} and total > 0:
+        # Repair stale meta files created by the first low-memory release once
+        # the checkpoint proves the task is recoverable.
+        if stub.get("resume_available") is not True:
+            stub["resume_available"] = True
+            meta_changed = True
+
     stub["_lazy"] = True
     stub["_lazy_path"] = str(path)
-    try:
-        persist_job_meta(stub)
-    except Exception:
-        pass
+    # Avoid an fsync-heavy rewrite of every healthy history meta file at startup.
+    if meta_changed or not had_meta:
+        try:
+            persist_job_meta(stub)
+        except Exception:
+            pass
     return stub
 
 

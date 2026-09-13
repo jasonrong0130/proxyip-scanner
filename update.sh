@@ -23,7 +23,7 @@ systemctl daemon-reload
 systemctl enable proxyip-scanner >/dev/null 2>&1 || true
 systemctl restart proxyip-scanner
 
-for i in {1..10}; do
+for i in {1..30}; do
   if curl -fsS http://127.0.0.1:8788/health; then
     echo
     exit 0
@@ -31,7 +31,7 @@ for i in {1..10}; do
   sleep 1
 done
 
-echo "服务重启后 10 秒内未通过健康检查："
+echo "服务重启后 30 秒内未通过健康检查："
 systemctl status proxyip-scanner --no-pager -l || true
 journalctl -u proxyip-scanner -n 80 --no-pager || true
 exit 1

@@ -13,6 +13,8 @@ This release focuses on task lifecycle correctness, memory reclamation and expli
 - Job execution has a unified cancellation/error cleanup wrapper.
 - Finished jobs are reduced to lightweight lazy stubs and hydrate only when history results are opened.
 - EDT-stage cancellation follows the same cleanup lifecycle.
+- Stable completed/cancelled history no longer replays large checkpoint journals on every service startup.
+- Upgrade readiness polling now waits up to 30 seconds before reporting failure.
 
 ### History cleanup
 

@@ -22,6 +22,8 @@ All notable changes to ProxyIP Scanner are documented here.
 - Completed/cancelled/interrupted jobs are reduced to lightweight lazy stubs after execution
 - CI now validates the main web console JavaScript and job lifecycle cleanup tests
 - History cleanup keeps currently running or paused jobs intact
+- Service startup skips checkpoint replay and metadata rewrites for stable completed/cancelled history
+- Upgrade health checks now allow up to 30 seconds for service readiness
 
 ## [1.0.0] - 2026-09-11
 
