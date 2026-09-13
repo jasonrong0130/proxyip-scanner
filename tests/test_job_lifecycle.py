@@ -76,14 +76,16 @@ class JobLifecycleTests(unittest.TestCase):
         app.persist_job_meta(job)
         app.checkpoint_path(job["id"]).write_text('{"i":0,"row":{"state":"checked"}}\n', encoding="utf-8")
 
-        result = app.purge_job(job["id"])
+        job_id = job["id"]
+        result = app.purge_job(job_id)
 
         self.assertTrue(result["deleted"])
         self.assertEqual(result["deleted_files"], 3)
-        self.assertNotIn(job["id"], app.JOBS)
-        self.assertFalse(app.job_path(job["id"]).exists())
-        self.assertFalse(app.job_meta_path(job["id"]).exists())
-        self.assertFalse(app.checkpoint_path(job["id"]).exists())
+        self.assertNotIn(job_id, app.JOBS)
+        self.assertFalse(app.job_path(job_id).exists())
+        self.assertFalse(app.job_meta_path(job_id).exists())
+        self.assertFalse(app.checkpoint_path(job_id).exists())
+        self.assertEqual(job, {})
 
     def test_purge_history_removes_inactive_but_keeps_active_jobs(self) -> None:
         inactive = make_job("333333333333")
@@ -93,14 +95,17 @@ class JobLifecycleTests(unittest.TestCase):
         app.persist_job(inactive)
         app.persist_job(active)
 
+        inactive_id = inactive["id"]
+        active_id = active["id"]
         result = app.purge_history_jobs()
 
         self.assertEqual(result["deleted"], 1)
         self.assertEqual(result["skipped_active"], 1)
-        self.assertNotIn(inactive["id"], app.JOBS)
-        self.assertIn(active["id"], app.JOBS)
-        self.assertFalse(app.job_path(inactive["id"]).exists())
-        self.assertTrue(app.job_path(active["id"]).exists())
+        self.assertNotIn(inactive_id, app.JOBS)
+        self.assertIn(active_id, app.JOBS)
+        self.assertFalse(app.job_path(inactive_id).exists())
+        self.assertTrue(app.job_path(active_id).exists())
+        self.assertEqual(inactive, {})
 
     def test_cancelled_run_releases_full_job_reference(self) -> None:
         async def scenario() -> None:
