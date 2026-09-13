@@ -107,6 +107,59 @@ class JobLifecycleTests(unittest.TestCase):
         self.assertTrue(app.job_path(active_id).exists())
         self.assertEqual(inactive, {})
 
+    def test_completed_history_stub_skips_checkpoint_replay_and_meta_rewrite(self) -> None:
+        job = make_job("666666666666")
+        app.persist_job(job)
+        app.checkpoint_path(job["id"]).write_text(
+            '{"i":0,"row":{"state":"checked","available":false}}\n',
+            encoding="utf-8",
+        )
+
+        original_checkpoint = app._checkpoint_summary
+        original_persist_meta = app.persist_job_meta
+
+        def unexpected_checkpoint(*args, **kwargs):
+            raise AssertionError("stable completed history must not replay checkpoints at startup")
+
+        def unexpected_meta_write(*args, **kwargs):
+            raise AssertionError("stable completed history must not rewrite meta at startup")
+
+        app._checkpoint_summary = unexpected_checkpoint
+        app.persist_job_meta = unexpected_meta_write
+        try:
+            stub = app.read_job_stub(app.job_path(job["id"]))
+        finally:
+            app._checkpoint_summary = original_checkpoint
+            app.persist_job_meta = original_persist_meta
+
+        self.assertIsNotNone(stub)
+        self.assertEqual(stub["state"], "completed")
+        self.assertTrue(stub["_lazy"])
+        self.assertEqual(stub["total"], job["total"])
+
+    def test_inflight_history_stub_replays_checkpoint_for_crash_recovery(self) -> None:
+        job = make_job("777777777777", state="checking")
+        app.persist_job(job)
+        called = []
+        original_checkpoint = app._checkpoint_summary
+
+        def checkpoint(job_id: str, total: int) -> dict:
+            called.append((job_id, total))
+            return {"completed": 1, "available": 1}
+
+        app._checkpoint_summary = checkpoint
+        try:
+            stub = app.read_job_stub(app.job_path(job["id"]))
+        finally:
+            app._checkpoint_summary = original_checkpoint
+
+        self.assertEqual(called, [(job["id"], job["total"])])
+        self.assertEqual(stub["state"], "interrupted")
+        self.assertEqual(stub["interrupted_stage"], "checking")
+        self.assertEqual(stub["completed"], 1)
+        self.assertEqual(stub["available"], 1)
+        self.assertTrue(stub["resume_available"])
+
     def test_cancelled_run_releases_full_job_reference(self) -> None:
         async def scenario() -> None:
             job = make_job("555555555555", state="queued")
