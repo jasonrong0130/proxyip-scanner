@@ -62,6 +62,7 @@ PING0_API_KEY = os.environ.get("PING0_API_KEY", "").strip()
 DEFAULT_PURITY_CONCURRENCY = max(1, min(10, int(os.environ.get("PURITY_CONCURRENCY", "4"))))
 CHECKPOINT_BATCH_SIZE = max(20, min(1000, int(os.environ.get("SCAN_CHECKPOINT_BATCH", "100"))))
 LARGE_JOB_THRESHOLD = max(1000, int(os.environ.get("LARGE_JOB_THRESHOLD", "20000")))
+MAX_RESUME_ITEMS = max(1000, int(os.environ.get("MAX_RESUME_ITEMS", "500000")))
 JOB_RETENTION_DAYS = max(1, min(365, int(os.environ.get("JOB_RETENTION_DAYS", "7"))))
 JOB_RETENTION_SECONDS = JOB_RETENTION_DAYS * 86400
 JOB_META_FIELDS = (
@@ -734,6 +735,9 @@ def read_job_stub(path: Path) -> Optional[dict]:
     total = int(stub.get("total") or 0)
     old_state = str(stub.get("state") or "")
     interrupted_stage = str(stub.get("interrupted_stage") or "")
+    resume_blocked = total > MAX_RESUME_ITEMS
+    if resume_blocked:
+        stub["resume_available"] = False
 
     # Stable completed/cancelled history already has authoritative metadata.
     # Replaying a large append-only checkpoint for every historical job at
@@ -741,10 +745,10 @@ def read_job_stub(path: Path) -> Optional[dict]:
     # Only crash/interruption recovery needs the expensive checkpoint summary.
     needs_checkpoint_recovery = (
         not had_meta
-        or old_state in {"queued", "checking", "runtime_checking", "speeding", "purity_checking"}
-        or (old_state == "interrupted" and interrupted_stage in {"queued", "checking"})
+        or (not resume_blocked and old_state in {"queued", "checking", "runtime_checking", "speeding", "purity_checking"})
+        or (not resume_blocked and old_state == "interrupted" and interrupted_stage in {"queued", "checking"})
     )
-    if needs_checkpoint_recovery and total > 0:
+    if needs_checkpoint_recovery and total > 0 and not resume_blocked:
         checkpoint = _checkpoint_summary(job_id, total)
         if checkpoint:
             for key, value in checkpoint.items():
@@ -757,13 +761,17 @@ def read_job_stub(path: Path) -> Optional[dict]:
         stub["state"] = "interrupted"
         # If base scanning reached total but the process died during the stage
         # transition, resume still needs to run so run_job can enter EDT.
-        stub["resume_available"] = old_state in {"checking", "queued"} and total > 0
+        stub["resume_available"] = (not resume_blocked) and old_state in {"checking", "queued"} and total > 0
         stub["finished_at"] = stub.get("finished_at") or now()
+        if resume_blocked:
+            stub["resume_available"] = False
         meta_changed = True
     elif old_state == "interrupted" and interrupted_stage in {"checking", "queued"} and total > 0:
-        # Repair stale meta files created by the first low-memory release once
-        # the checkpoint proves the task is recoverable.
-        if stub.get("resume_available") is not True:
+        # Large interrupted jobs are metadata-only and must never rebuild targets/results.
+        if resume_blocked:
+            stub["resume_available"] = False
+            meta_changed = True
+        elif stub.get("resume_available") is not True:
             stub["resume_available"] = True
             meta_changed = True
 
@@ -927,6 +935,8 @@ def hydrate_job(job_id: str) -> Optional[dict]:
         return None
     if not current.get("_lazy"):
         return current
+    if int(current.get("total") or 0) > MAX_RESUME_ITEMS:
+        return None
     path = Path(str(current.get("_lazy_path") or job_path(job_id)))
     try:
         with path.open("r", encoding="utf-8") as handle:
@@ -958,6 +968,11 @@ def release_job_memory(job: dict) -> None:
         pass
     job.pop("_task", None)
     job.pop("_checkpoint_buffer", None)
+    if int(job.get("total") or 0) > MAX_RESUME_ITEMS and state == "interrupted":
+        job.pop("targets", None)
+        job.pop("results", None)
+        job.pop("settings", None)
+        job.pop("speed_session", None)
     stub = {key: job.get(key) for key in JOB_META_FIELDS}
     stub["_lazy"] = True
     stub["_lazy_path"] = str(job_path(str(job.get("id") or "")))
@@ -1511,13 +1526,16 @@ async def list_jobs(request: Request) -> dict:
     require_web_session(request)
     cleanup_expired_jobs()
     rows = []
-    for job in sorted(JOBS.values(), key=lambda x: x.get("created_at", 0), reverse=True)[:100]:
-        # Opening history is also a durability boundary: flush any completed rows
-        # still waiting in the in-memory checkpoint buffer before returning metadata.
-        if not job.get("_lazy"):
-            flush_result_checkpoints(job)
-        rows.append({k: job.get(k) for k in ["id", "state", "interrupted_stage", "resume_available", "created_at", "started_at", "finished_at", "total", "completed", "available", "final_available", "runtime_total", "runtime_completed", "runtime_available", "speed_total", "speed_completed", "purity_total", "purity_completed"]})
-    return {"jobs": rows}
+    # History is metadata-only. Never hydrate full targets/results for listing.
+    for job_id in list(JOBS):
+        job = JOBS.get(job_id) or {}
+        path = Path(str(job.get("_lazy_path") or job_path(job_id)))
+        stub = read_job_stub(path) if path.exists() else job
+        if stub:
+            JOBS[job_id] = stub
+        rows.append({k: stub.get(k) for k in ["id", "state", "interrupted_stage", "resume_available", "created_at", "started_at", "finished_at", "total", "completed", "available", "final_available", "runtime_total", "runtime_completed", "runtime_available", "speed_total", "speed_completed", "purity_total", "purity_completed"]})
+    rows.sort(key=lambda x: x.get("created_at", 0) or 0, reverse=True)
+    return {"jobs": rows[:100]}
 
 
 @app.post("/api/jobs")
@@ -1733,6 +1751,10 @@ async def resume_interrupted_scan(job_id: str, request: Request) -> dict:
         raise HTTPException(status_code=404, detail="job not found")
     if job.get("state") != "interrupted" or job.get("interrupted_stage") not in {"checking", "queued"}:
         raise HTTPException(status_code=409, detail="当前任务不是可续扫的一级扫描")
+    if int(job.get("total") or 0) > MAX_RESUME_ITEMS:
+        job["resume_available"] = False
+        persist_job_meta(job)
+        raise HTTPException(status_code=409, detail="超大任务不支持自动恢复，请重新创建任务")
     pending = sum(1 for row in job.get("results", []) if row.get("state") != "checked")
     total = int(job.get("total") or 0)
     completed = int(job.get("completed") or 0)

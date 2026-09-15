@@ -160,6 +160,26 @@ class JobLifecycleTests(unittest.TestCase):
         self.assertEqual(stub["available"], 1)
         self.assertTrue(stub["resume_available"])
 
+    def test_large_interrupted_job_disables_resume_without_hydrate(self) -> None:
+        job = make_job("888888888888", state="checking", total=app.MAX_RESUME_ITEMS + 1)
+        job["interrupted_stage"] = "checking"
+        job["resume_available"] = True
+        app.persist_job(job)
+
+        stub = app.read_job_stub(app.job_path(job["id"]))
+
+        self.assertIsNotNone(stub)
+        self.assertFalse(stub["resume_available"])
+        self.assertIsNone(app.hydrate_job(job["id"]))
+
+    def test_large_interrupted_memory_cleanup_drops_payload(self) -> None:
+        job = make_job("999999999999", state="interrupted", total=app.MAX_RESUME_ITEMS + 1)
+        app.JOBS[job["id"]] = job
+        app.release_job_memory(job)
+        stub = app.JOBS[job["id"]]
+        self.assertNotIn("targets", stub)
+        self.assertNotIn("results", stub)
+
     def test_cancelled_run_releases_full_job_reference(self) -> None:
         async def scenario() -> None:
             job = make_job("555555555555", state="queued")
