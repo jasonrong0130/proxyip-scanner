@@ -42,7 +42,11 @@ XIAOBEI_RAW_COUNTRY = "https://raw.githubusercontent.com/Xiaobei09/proxyip/main/
 XIAOBEI_VALID_COUNTRY = "https://raw.githubusercontent.com/Xiaobei09/proxyip/main/data/valid/countries/{region}/all.txt"
 XIAOBEI_FAST_COUNTRY = "https://raw.githubusercontent.com/Xiaobei09/proxyip/main/data/valid/countries/{region}/ltd.txt"
 VPNGATE_SOURCE = "https://www.vpngate.net/api/iphone/"
-FREESUB_SOURCE = "https://raw.githubusercontent.com/hezhanleiok/freesub/main/sub/share_sub.txt"
+FREESUB_SOURCES = (
+    "https://raw.githubusercontent.com/hezhanleiok/freesub/main/output/v2ray.txt",
+    "https://raw.githubusercontent.com/hezhanleiok/freesub/main/output/clash.yaml",
+    "https://raw.githubusercontent.com/hezhanleiok/freesub/main/output/singbox.json",
+)
 PUBLIC_PROXY_SOURCES = (
     "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
     "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
@@ -630,8 +634,14 @@ async def _fetch_vpngate() -> List[str]:
 
 
 async def _fetch_freesub() -> List[str]:
-    text = await _fetch_text(FREESUB_SOURCE)
-    return _parse_loose(text)
+    rows = await asyncio.gather(*(_fetch_text(url) for url in FREESUB_SOURCES), return_exceptions=True)
+    values = []
+    for row in rows:
+        if not isinstance(row, Exception):
+            values.extend(_parse_loose(row))
+    if not values:
+        raise RuntimeError("freesub 无有效代理地址")
+    return _dedupe(values)
 
 
 async def _fetch_public_proxies() -> List[str]:
