@@ -41,6 +41,12 @@ NIREVIL_MASTER_CSV = "https://raw.githubusercontent.com/NiREvil/vless/main/sub/c
 XIAOBEI_RAW_COUNTRY = "https://raw.githubusercontent.com/Xiaobei09/proxyip/main/data/download/countries/{region}.txt"
 XIAOBEI_VALID_COUNTRY = "https://raw.githubusercontent.com/Xiaobei09/proxyip/main/data/valid/countries/{region}/all.txt"
 XIAOBEI_FAST_COUNTRY = "https://raw.githubusercontent.com/Xiaobei09/proxyip/main/data/valid/countries/{region}/ltd.txt"
+VPNGATE_SOURCE = "https://www.vpngate.net/api/iphone/"
+FREESUB_SOURCE = "https://raw.githubusercontent.com/hezhanleiok/freesub/main/sub/share_sub.txt"
+PUBLIC_PROXY_SOURCES = (
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
+)
 REGION_CATALOG_TTL = REFRESH_INTERVAL
 ENABLE_XIAOBEI = str(os.environ.get("CANDIDATE_ENABLE_XIAOBEI", "1")).strip().lower() in {"1", "true", "yes", "on"}
 ENABLE_LEILAOMI = str(os.environ.get("CANDIDATE_ENABLE_LEILAOMI", "0")).strip().lower() in {"1", "true", "yes", "on"}
@@ -541,6 +547,9 @@ async def _region_sources(region: str) -> List[dict]:
             _run_source(f"Xiaobei 原始候选 {region}", region, lambda region=region: _fetch_xiaobei_raw(region)),
         ])
     work.append(_run_source(f"NiREvil {region}", region, lambda region=region: _fetch_country(region)))
+    work.append(_run_source("VPNGate", None, _fetch_vpngate))
+    work.append(_run_source("freesub", None, _fetch_freesub))
+    work.append(_run_source("公共 SOCKS5/HTTP proxy", None, _fetch_public_proxies))
     if region in REGIONS:
         if region in REGION_WORDS:
             work.append(_run_source(f"NiREvil Daily {region}", region, lambda region=region: _fetch_daily(region)))
@@ -615,6 +624,25 @@ async def _fetch_daily(region: str) -> List[str]:
     return _parse_daily(text, region)
 
 
+async def _fetch_vpngate() -> List[str]:
+    text = await _fetch_text(VPNGATE_SOURCE)
+    return _parse_loose(text)
+
+
+async def _fetch_freesub() -> List[str]:
+    text = await _fetch_text(FREESUB_SOURCE)
+    return _parse_loose(text)
+
+
+async def _fetch_public_proxies() -> List[str]:
+    rows = await asyncio.gather(*(_fetch_text(url) for url in PUBLIC_PROXY_SOURCES), return_exceptions=True)
+    values = []
+    for row in rows:
+        if not isinstance(row, Exception):
+            values.extend(_parse_loose(row))
+    return _dedupe(values)
+
+
 async def _fetch_leilaomi() -> List[str]:
     sources = [
         ("all", "https://list.leilaomi.cc.cd/all.txt"),
@@ -676,10 +704,12 @@ async def refresh_region(region: str) -> dict:
         for target in source.get("items", []):
             key = target.lower()
             if key not in merged:
-                merged[key] = {"target": target, "sources": [], "region_hints": []}
+                merged[key] = {"target": target, "source": source.get("name"), "sources": [], "region_hints": []}
             meta = merged[key]
             if source["name"] not in meta["sources"]:
                 meta["sources"].append(source["name"])
+            if not meta.get("source"):
+                meta["source"] = source.get("name")
             hint = source.get("region_hint")
             if hint and hint not in meta["region_hints"]:
                 meta["region_hints"].append(hint)
