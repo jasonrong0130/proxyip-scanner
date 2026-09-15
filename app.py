@@ -935,8 +935,6 @@ def hydrate_job(job_id: str) -> Optional[dict]:
         return None
     if not current.get("_lazy"):
         return current
-    if int(current.get("total") or 0) > MAX_RESUME_ITEMS:
-        return None
     path = Path(str(current.get("_lazy_path") or job_path(job_id)))
     try:
         with path.open("r", encoding="utf-8") as handle:
@@ -1752,9 +1750,7 @@ async def resume_interrupted_scan(job_id: str, request: Request) -> dict:
     if job.get("state") != "interrupted" or job.get("interrupted_stage") not in {"checking", "queued"}:
         raise HTTPException(status_code=409, detail="当前任务不是可续扫的一级扫描")
     if int(job.get("total") or 0) > MAX_RESUME_ITEMS:
-        job["resume_available"] = False
-        persist_job_meta(job)
-        raise HTTPException(status_code=409, detail="超大任务不支持自动恢复，请重新创建任务")
+        raise HTTPException(status_code=409, detail="超大任务未保留恢复数据，请重新创建扫描任务")
     pending = sum(1 for row in job.get("results", []) if row.get("state") != "checked")
     total = int(job.get("total") or 0)
     completed = int(job.get("completed") or 0)
