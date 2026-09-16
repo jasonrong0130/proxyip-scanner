@@ -34,7 +34,7 @@ _CONFIGURED = False
 
 REFRESH_INTERVAL = max(3600, int(os.environ.get("CANDIDATE_REFRESH_INTERVAL", str(6 * 3600))))
 RECHECK_INTERVAL = max(6 * 3600, int(os.environ.get("CANDIDATE_RECHECK_INTERVAL", str(24 * 3600))))
-MAX_PER_REGION = max(100, min(10000, int(os.environ.get("CANDIDATE_MAX_PER_REGION", "5000"))))
+MAX_PER_REGION = int(os.environ.get("CANDIDATE_MAX_PER_REGION", "0"))
 AUTO_RECHECK_LIMIT = max(100, min(5000, int(os.environ.get("CANDIDATE_AUTO_RECHECK_LIMIT", "500"))))
 REGIONS = ("HK", "JP", "SG", "KR", "IN", "US", "DE")
 NIREVIL_MASTER_CSV = "https://raw.githubusercontent.com/NiREvil/vless/main/sub/country_proxies/02_proxies.csv"
@@ -727,7 +727,7 @@ async def refresh_region(region: str) -> dict:
                 seen.add(key)
                 contributed += 1
         stats.append({k: source.get(k) for k in ("name", "count", "status", "ms")} | {"contributed": contributed})
-    candidates = list(merged.values())[:MAX_PER_REGION]
+    candidates = list(merged.values()) if MAX_PER_REGION <= 0 else list(merged.values())[:MAX_PER_REGION]
     pool = _pool_data()
     pool["regions"][region] = {"updated_at": _now(), "count": len(candidates), "candidates": candidates, "source_stats": stats}
     pool["updated_at"] = _now()
