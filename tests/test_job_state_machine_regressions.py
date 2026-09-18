@@ -275,6 +275,25 @@ class JobStateMachineRegressionTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_stale_completed_job_with_partial_edt_recovers_as_resumable_runtime_interruption(self):
+        job = make_job("ee55ee55ee55", state="completed", total=7962)
+        job["completed"] = 7962
+        job["runtime_total"] = 2487
+        job["runtime_completed"] = 55
+        job["runtime_available"] = 55
+        job["final_available"] = 55
+        job["finished_at"] = app.now()
+        app.persist_job(job)
+
+        stub = app.read_job_stub(app.job_path(job["id"]))
+
+        self.assertEqual(stub["state"], "interrupted")
+        self.assertEqual(stub["interrupted_stage"], "runtime_checking")
+        self.assertTrue(stub["resume_available"])
+        self.assertEqual(stub["completed"], 7962)
+        self.assertEqual(stub["runtime_total"], 2487)
+        self.assertEqual(stub["runtime_completed"], 55)
+
     def test_restart_during_speeding_becomes_resumable_speed_pause_not_dead_interruption(self):
         job = make_job("c33333333333", state="speeding", total=3)
         job["speed_total"] = 3
