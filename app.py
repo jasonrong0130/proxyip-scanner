@@ -72,7 +72,12 @@ JOB_META_FIELDS = (
     "speed_total", "speed_completed", "purity_total", "purity_completed",
 )
 PRIMARY_SCAN_ACTIVE_STATES = {"queued", "checking", "runtime_checking"}
-JOB_ACTIVE_STATES = PRIMARY_SCAN_ACTIVE_STATES | {"speeding", "purity_checking", "speed_paused", "purity_paused"}
+PRIMARY_SCAN_PAUSED_STATES = {"paused"}
+PRIMARY_SCAN_HELD_STATES = PRIMARY_SCAN_ACTIVE_STATES | PRIMARY_SCAN_PAUSED_STATES
+POST_PROCESS_ACTIVE_STATES = {"speeding", "purity_checking"}
+POST_PROCESS_PAUSED_STATES = {"speed_paused", "purity_paused"}
+JOB_RUNNING_STATES = PRIMARY_SCAN_ACTIVE_STATES | POST_PROCESS_ACTIVE_STATES
+JOB_ACTIVE_STATES = PRIMARY_SCAN_HELD_STATES | POST_PROCESS_ACTIVE_STATES | POST_PROCESS_PAUSED_STATES
 RESUMABLE_INTERRUPTED_STAGES = {"queued", "checking", "runtime_checking"}
 
 TARGET_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -563,12 +568,12 @@ def flush_result_checkpoints(job: dict) -> None:
     job["_checkpoint_buffer"] = []
 
 
-def checkpoint_result(job: dict, index: int) -> None:
+def checkpoint_result(job: dict, index: int, *, durable: bool = False) -> None:
     if index < 0 or index >= len(job.get("results", [])):
         return
     buffer = job.setdefault("_checkpoint_buffer", [])
     buffer.append({"i": int(index), "row": job["results"][index]})
-    if len(buffer) >= CHECKPOINT_BATCH_SIZE:
+    if durable or len(buffer) >= CHECKPOINT_BATCH_SIZE:
         flush_result_checkpoints(job)
 
 
@@ -839,7 +844,7 @@ def _active_primary_job_id(exclude_job_id: Optional[str] = None) -> Optional[str
         task = current.get("_task")
         if task is not None and not task.done():
             return current_id
-        if str(current.get("state") or "") in PRIMARY_SCAN_ACTIVE_STATES:
+        if str(current.get("state") or "") in PRIMARY_SCAN_HELD_STATES:
             return current_id
     return None
 
@@ -991,7 +996,10 @@ def hydrate_job(job_id: str) -> Optional[dict]:
 
 def release_job_memory(job: dict) -> None:
     state = str(job.get("state") or "")
-    if state in JOB_ACTIVE_STATES:
+    # Running coroutines still need their full payload. Paused jobs do not: their
+    # durable snapshot/checkpoint is enough, so replace them with a lazy stub to
+    # prevent hours-long pauses from pinning large result arrays in RAM.
+    if state in JOB_RUNNING_STATES:
         return
     try:
         flush_result_checkpoints(job)
@@ -1015,6 +1023,16 @@ def release_job_memory(job: dict) -> None:
 load_job_index()
 
 
+def _persist_primary_pause(job: dict, stage: str) -> None:
+    flush_result_checkpoints(job)
+    job["state"] = "paused"
+    job["interrupted_stage"] = stage
+    job["resume_available"] = True
+    job["pause_requested"] = False
+    job["finished_at"] = None
+    compact_job_checkpoint(job)
+
+
 async def _run_job_impl(job: dict) -> None:
     settings = job["settings"]
     targets = job["targets"]
@@ -1023,6 +1041,7 @@ async def _run_job_impl(job: dict) -> None:
     job["state"] = "checking"
     job["interrupted_stage"] = None
     job["resume_available"] = False
+    job["pause_requested"] = False
     job["started_at"] = job.get("started_at") or now()
     persist_job(job)
 
@@ -1035,7 +1054,7 @@ async def _run_job_impl(job: dict) -> None:
 
     async def worker_loop() -> None:
         nonlocal next_index
-        while not job.get("cancel_requested"):
+        while not job.get("cancel_requested") and not job.get("pause_requested"):
             async with index_lock:
                 if next_index >= len(pending_indices):
                     return
@@ -1077,6 +1096,13 @@ async def _run_job_impl(job: dict) -> None:
         release_job_memory(job)
         return
 
+    if job.get("pause_requested"):
+        for row in job["results"]:
+            if row.get("state") == "checking":
+                row["state"] = "pending"
+        _persist_primary_pause(job, "checking")
+        return
+
     runtime_cfg = settings.get("edt_runtime") or {}
     if runtime_cfg.get("enabled"):
         runtime_all = [i for i, r in enumerate(job["results"]) if isinstance(r, dict) and r.get("available") is True]
@@ -1100,7 +1126,7 @@ async def _run_job_impl(job: dict) -> None:
 
         async def runtime_worker_loop() -> None:
             nonlocal runtime_index
-            while not job.get("cancel_requested"):
+            while not job.get("cancel_requested") and not job.get("pause_requested"):
                 async with runtime_lock:
                     if runtime_index >= len(runtime_candidates):
                         return
@@ -1126,7 +1152,10 @@ async def _run_job_impl(job: dict) -> None:
                 if row["edt_available"]:
                     job["runtime_available"] += 1
                     job["final_available"] += 1
-                checkpoint_result(job, row_idx)
+                # EDT is the expensive final gate. Make every completed EDT row
+                # durable immediately so an abrupt service/VPS restart never turns
+                # e.g. 12/80 back into 0/80 and never re-runs those 12 rows.
+                checkpoint_result(job, row_idx, durable=True)
 
         runtime_workers = [
             asyncio.create_task(runtime_worker_loop())
@@ -1134,6 +1163,13 @@ async def _run_job_impl(job: dict) -> None:
         ]
         if runtime_workers:
             await asyncio.gather(*runtime_workers, return_exceptions=True)
+
+        if job.get("pause_requested"):
+            for row in job["results"]:
+                if row.get("state") == "runtime_checking":
+                    row["state"] = "checked"
+            _persist_primary_pause(job, "runtime_checking")
+            return
     else:
         for row in job["results"]:
             row["edt_available"] = None
@@ -1236,9 +1272,19 @@ async def run_job(job: dict) -> None:
     try:
         await _run_job_impl(job)
     except asyncio.CancelledError:
-        job["cancel_requested"] = True
-        job["state"] = "cancelled"
-        job["finished_at"] = job.get("finished_at") or now()
+        previous_state = str(job.get("state") or "")
+        # Only an explicit Stop request is a true cancellation. Process/service
+        # shutdown also cancels asyncio tasks, but that must remain resumable.
+        if job.get("cancel_requested"):
+            job["state"] = "cancelled"
+            job["resume_available"] = False
+            job["finished_at"] = job.get("finished_at") or now()
+        else:
+            if previous_state in PRIMARY_SCAN_ACTIVE_STATES:
+                job["interrupted_stage"] = previous_state
+            job["state"] = "interrupted"
+            job["resume_available"] = previous_state in RESUMABLE_INTERRUPTED_STAGES and int(job.get("total") or 0) > 0
+            job["finished_at"] = now()
         try:
             compact_job_checkpoint(job)
         except Exception:
@@ -1264,7 +1310,7 @@ async def run_job(job: dict) -> None:
         raise
     finally:
         job.pop("_task", None)
-        if str(job.get("state") or "") not in JOB_ACTIVE_STATES:
+        if str(job.get("state") or "") not in JOB_RUNNING_STATES:
             release_job_memory(job)
 
 
@@ -1641,7 +1687,7 @@ async def create_job(request: Request) -> dict:
         "id": job_id,
         "candidate_region": candidate_region or None,
         "created_at": now(), "started_at": None, "finished_at": None,
-        "state": "queued", "cancel_requested": False, "interrupted_stage": None, "resume_available": False,
+        "state": "queued", "cancel_requested": False, "pause_requested": False, "interrupted_stage": None, "resume_available": False,
         "targets": targets, "total": len(targets), "completed": 0, "available": 0, "final_available": 0,
         "generic_available": 0, "same_exit": 0, "runtime_total": 0, "runtime_completed": 0, "runtime_available": 0,
         "speed_total": 0, "speed_completed": 0, "purity_total": 0, "purity_completed": 0,
@@ -1798,6 +1844,31 @@ async def run_post_speed(job: dict, candidate_keys: set[str], mode: str) -> None
         release_job_memory(job)
 
 
+@app.post("/api/jobs/{job_id}/pause")
+async def pause_primary_scan(job_id: str, request: Request) -> dict:
+    payload = require_web_session(request)
+    require_csrf(request, payload)
+    job = hydrate_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    state = str(job.get("state") or "")
+    if state not in PRIMARY_SCAN_ACTIVE_STATES:
+        raise HTTPException(status_code=409, detail="当前主扫描任务不在运行中")
+    task = job.get("_task")
+    if task is None or task.done():
+        raise HTTPException(status_code=409, detail="主扫描任务已不在运行")
+    job["pause_requested"] = True
+    # Do not cancel the coroutine: let in-flight probes finish, persist them, then
+    # transition to paused. This makes pause deterministic and resumable.
+    await task
+    paused = JOBS.get(job_id) or {}
+    return {
+        "ok": True, "id": job_id, "state": paused.get("state"),
+        "completed": paused.get("completed", 0),
+        "runtime_completed": paused.get("runtime_completed", 0),
+    }
+
+
 @app.post("/api/jobs/{job_id}/resume-scan")
 async def resume_interrupted_scan(job_id: str, request: Request) -> dict:
     payload = require_web_session(request)
@@ -1813,8 +1884,8 @@ async def resume_interrupted_scan(job_id: str, request: Request) -> dict:
     if active_primary:
         raise HTTPException(status_code=409, detail=f"当前已有扫描任务 {active_primary}，请先处理该任务")
 
-    if job.get("state") != "interrupted" or job.get("interrupted_stage") not in RESUMABLE_INTERRUPTED_STAGES:
-        raise HTTPException(status_code=409, detail="当前任务不是可续扫的扫描阶段")
+    if job.get("state") not in {"interrupted", "paused"} or job.get("interrupted_stage") not in RESUMABLE_INTERRUPTED_STAGES:
+        raise HTTPException(status_code=409, detail="当前任务不是可继续的扫描阶段")
     if int(job.get("total") or 0) > MAX_RESUME_ITEMS:
         raise HTTPException(status_code=409, detail="超大任务未保留恢复数据，请重新创建扫描任务")
     pending = sum(1 for row in job.get("results", []) if row.get("state") != "checked")
@@ -1823,6 +1894,7 @@ async def resume_interrupted_scan(job_id: str, request: Request) -> dict:
     if pending <= 0 and not (total > 0 and completed >= total):
         raise HTTPException(status_code=409, detail="没有可恢复的扫描进度")
     job["cancel_requested"] = False
+    job["pause_requested"] = False
     job["finished_at"] = None
     job["resume_available"] = False
     persist_job(job)
