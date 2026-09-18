@@ -72,6 +72,7 @@ JOB_META_FIELDS = (
     "speed_total", "speed_completed", "purity_total", "purity_completed",
 )
 JOB_ACTIVE_STATES = {"queued", "checking", "runtime_checking", "speeding", "purity_checking", "speed_paused", "purity_paused"}
+RESUMABLE_INTERRUPTED_STAGES = {"queued", "checking", "runtime_checking"}
 
 TARGET_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 JOBS: Dict[str, dict] = {}
@@ -746,7 +747,7 @@ def read_job_stub(path: Path) -> Optional[dict]:
     needs_checkpoint_recovery = (
         not had_meta
         or (not resume_blocked and old_state in {"queued", "checking", "runtime_checking", "speeding", "purity_checking"})
-        or (not resume_blocked and old_state == "interrupted" and interrupted_stage in {"queued", "checking"})
+        or (not resume_blocked and old_state == "interrupted" and interrupted_stage in RESUMABLE_INTERRUPTED_STAGES)
     )
     if needs_checkpoint_recovery and total > 0 and not resume_blocked:
         checkpoint = _checkpoint_summary(job_id, total)
@@ -761,12 +762,12 @@ def read_job_stub(path: Path) -> Optional[dict]:
         stub["state"] = "interrupted"
         # If base scanning reached total but the process died during the stage
         # transition, resume still needs to run so run_job can enter EDT.
-        stub["resume_available"] = (not resume_blocked) and old_state in {"checking", "queued"} and total > 0
+        stub["resume_available"] = (not resume_blocked) and old_state in RESUMABLE_INTERRUPTED_STAGES and total > 0
         stub["finished_at"] = stub.get("finished_at") or now()
         if resume_blocked:
             stub["resume_available"] = False
         meta_changed = True
-    elif old_state == "interrupted" and interrupted_stage in {"checking", "queued"} and total > 0:
+    elif old_state == "interrupted" and interrupted_stage in RESUMABLE_INTERRUPTED_STAGES and total > 0:
         # Large interrupted jobs are metadata-only and must never rebuild targets/results.
         if resume_blocked:
             stub["resume_available"] = False
@@ -1210,7 +1211,7 @@ async def run_job(job: dict) -> None:
         if previous_state in {"queued", "checking", "runtime_checking", "speeding", "purity_checking"}:
             job["interrupted_stage"] = previous_state
         job["state"] = "interrupted"
-        job["resume_available"] = previous_state in {"queued", "checking"} and int(job.get("total") or 0) > 0
+        job["resume_available"] = previous_state in RESUMABLE_INTERRUPTED_STAGES and int(job.get("total") or 0) > 0
         job["finished_at"] = now()
         try:
             compact_job_checkpoint(job)
@@ -1747,8 +1748,8 @@ async def resume_interrupted_scan(job_id: str, request: Request) -> dict:
     job = hydrate_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
-    if job.get("state") != "interrupted" or job.get("interrupted_stage") not in {"checking", "queued"}:
-        raise HTTPException(status_code=409, detail="当前任务不是可续扫的一级扫描")
+    if job.get("state") != "interrupted" or job.get("interrupted_stage") not in RESUMABLE_INTERRUPTED_STAGES:
+        raise HTTPException(status_code=409, detail="当前任务不是可续扫的扫描阶段")
     if int(job.get("total") or 0) > MAX_RESUME_ITEMS:
         raise HTTPException(status_code=409, detail="超大任务未保留恢复数据，请重新创建扫描任务")
     pending = sum(1 for row in job.get("results", []) if row.get("state") != "checked")
