@@ -2423,6 +2423,9 @@ async def cancel_job(job_id: str, request: Request) -> dict:
     # deliberately paused. Only this explicit endpoint turns it into cancelled.
     if state in PRIMARY_SCAN_HELD_STATES:
         job["cancel_requested"] = True
+        job["pause_requested"] = False
+        job["resume_available"] = False
+        job["interrupted_stage"] = None
         job["state"] = "cancelled"
         job["finished_at"] = now()
         persist_job(job)
