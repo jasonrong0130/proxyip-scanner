@@ -217,7 +217,7 @@ class JobLifecycleTests(unittest.TestCase):
         self.assertNotIn("targets", stub)
         self.assertNotIn("results", stub)
 
-    def test_cancelled_run_releases_full_job_reference(self) -> None:
+    def test_service_side_task_cancellation_becomes_resumable_interruption_and_releases_memory(self) -> None:
         async def scenario() -> None:
             job = make_job("555555555555", state="queued")
             app.JOBS[job["id"]] = job
@@ -241,7 +241,9 @@ class JobLifecycleTests(unittest.TestCase):
                 app._run_job_impl = original
 
             stub = app.JOBS[job["id"]]
-            self.assertEqual(stub["state"], "cancelled")
+            self.assertEqual(stub["state"], "interrupted")
+            self.assertEqual(stub["interrupted_stage"], "checking")
+            self.assertTrue(stub["resume_available"])
             self.assertTrue(stub["_lazy"])
             self.assertNotIn("targets", stub)
             self.assertNotIn("results", stub)
