@@ -358,14 +358,24 @@ class JobStateMachineRegressionTests(unittest.TestCase):
             job["state"] = "runtime_checking"
             app.persist_job(job)
 
-            # A server shutdown cancels the background task without the user first
-            # setting cancel_requested. That must remain distinguishable from the
-            # explicit Stop button.
-            task = asyncio.create_task(app.run_job(job))
-            await asyncio.sleep(0)
-            task.cancel()
-            with self.assertRaises(asyncio.CancelledError):
-                await task
+            original_impl = app._run_job_impl
+
+            async def blocked_runtime(current):
+                current["state"] = "runtime_checking"
+                await asyncio.sleep(3600)
+
+            app._run_job_impl = blocked_runtime
+            try:
+                # A server shutdown cancels the background task without the user first
+                # setting cancel_requested. That must remain distinguishable from the
+                # explicit Stop button.
+                task = asyncio.create_task(app.run_job(job))
+                await asyncio.sleep(0)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+            finally:
+                app._run_job_impl = original_impl
 
             recovered = app.read_job_stub(app.job_path(job["id"]))
             self.assertIsNotNone(recovered)
