@@ -742,7 +742,9 @@ def read_job_stub(path: Path) -> Optional[dict]:
     total = int(stub.get("total") or 0)
     old_state = str(stub.get("state") or "")
     interrupted_stage = str(stub.get("interrupted_stage") or "")
-    resume_blocked = total > MAX_RESUME_ITEMS
+    # Crash recovery for very large jobs remains bounded, but an explicit user
+    # pause is a durable contract and must always be continuable.
+    resume_blocked = total > MAX_RESUME_ITEMS and old_state != "paused"
     if resume_blocked:
         stub["resume_available"] = False
 
@@ -1886,8 +1888,8 @@ async def resume_interrupted_scan(job_id: str, request: Request) -> dict:
 
     if job.get("state") not in {"interrupted", "paused"} or job.get("interrupted_stage") not in RESUMABLE_INTERRUPTED_STAGES:
         raise HTTPException(status_code=409, detail="当前任务不是可继续的扫描阶段")
-    if int(job.get("total") or 0) > MAX_RESUME_ITEMS:
-        raise HTTPException(status_code=409, detail="超大任务未保留恢复数据，请重新创建扫描任务")
+    if job.get("state") == "interrupted" and int(job.get("total") or 0) > MAX_RESUME_ITEMS:
+        raise HTTPException(status_code=409, detail="超大任务异常中断后未保留可恢复数据，请重新创建扫描任务")
     pending = sum(1 for row in job.get("results", []) if row.get("state") != "checked")
     total = int(job.get("total") or 0)
     completed = int(job.get("completed") or 0)
@@ -2417,8 +2419,9 @@ async def cancel_job(job_id: str, request: Request) -> dict:
             "restartable": True,
         }
 
-    # Cancelling the primary scan remains a real job cancellation.
-    if state in {"queued", "checking", "runtime_checking"}:
+    # Stopping the primary scan is final, whether it is currently running or
+    # deliberately paused. Only this explicit endpoint turns it into cancelled.
+    if state in PRIMARY_SCAN_HELD_STATES:
         job["cancel_requested"] = True
         job["state"] = "cancelled"
         job["finished_at"] = now()
