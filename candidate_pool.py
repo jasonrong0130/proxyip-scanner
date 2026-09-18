@@ -1,5 +1,6 @@
 import asyncio
 import csv
+import gc
 import io
 import ipaddress
 import json
@@ -125,8 +126,26 @@ def _load_json(name: str, default: Any) -> Any:
 def _save_json(name: str, value: Any) -> None:
     path = _path(name)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Stream JSON directly to disk. Building one giant json.dumps() string for
+    # an unlimited candidate pool temporarily duplicates tens of MiB in memory.
+    with tmp.open("w", encoding="utf-8") as handle:
+        json.dump(value, handle, ensure_ascii=False, separators=(",", ":"))
+        handle.flush()
+        os.fsync(handle.fileno())
     tmp.replace(path)
+
+
+def _release_memory() -> None:
+    """Collect dead Python objects and return free glibc arenas when possible."""
+    gc.collect()
+    try:
+        import ctypes
+        libc = ctypes.CDLL("libc.so.6")
+        malloc_trim = getattr(libc, "malloc_trim", None)
+        if malloc_trim is not None:
+            malloc_trim(0)
+    except Exception:
+        pass
 
 
 def _valid_public_ipv4(value: str) -> bool:
@@ -506,11 +525,101 @@ def _public_source(row: dict) -> dict:
 
 
 def _pool_data() -> dict:
+    """Legacy monolithic pool loader, retained only for one-time migration."""
     data = _load_json("candidate_pool.json", {"regions": {}, "updated_at": None})
     if not isinstance(data, dict):
         data = {"regions": {}, "updated_at": None}
     data.setdefault("regions", {})
     return data
+
+
+def _region_pool_name(region: str) -> str:
+    return f"candidate_pool_{str(region).upper()}.json"
+
+
+def _pool_meta() -> dict:
+    value = _load_json("candidate_pool_meta.json", {})
+    return value if isinstance(value, dict) else {}
+
+
+def _record_region_meta(region: str, data: dict) -> None:
+    meta = _pool_meta()
+    rows = meta.get("region_counts")
+    if not isinstance(rows, dict):
+        rows = {}
+    rows[str(region).upper()] = {
+        "count": int(data.get("count") or 0),
+        "updated_at": data.get("updated_at"),
+    }
+    meta["region_counts"] = rows
+    timestamps = [
+        float(row.get("updated_at") or 0)
+        for row in rows.values()
+        if isinstance(row, dict) and row.get("updated_at")
+    ]
+    meta["pool_updated_at"] = max(timestamps) if timestamps else meta.get("pool_updated_at")
+    meta["split_pool_v1"] = True
+    _save_json("candidate_pool_meta.json", meta)
+
+
+def _load_region_pool(region: str, catalog: Optional[dict] = None) -> dict:
+    region = str(region or "").upper()
+    value = _load_json(_region_pool_name(region), None)
+    if isinstance(value, dict):
+        value.setdefault("candidates", [])
+        value.setdefault("source_stats", [])
+        value.setdefault("count", len(value.get("candidates") or []))
+        return value
+
+    # During the first run after upgrading, lazily fall back to the old file.
+    # Startup migration normally creates all split files before requests arrive.
+    meta = _pool_meta()
+    if not meta.get("split_pool_v1") and _path("candidate_pool.json").exists():
+        legacy = _pool_data()
+        row = (legacy.get("regions") or {}).get(region)
+        if isinstance(row, dict):
+            _save_json(_region_pool_name(region), row)
+            _record_region_meta(region, row)
+            del legacy
+            _release_memory()
+            return row
+        del legacy
+        _release_memory()
+
+    if catalog is not None:
+        return _catalog_pool(region, catalog)
+    return {"updated_at": None, "count": 0, "candidates": [], "source_stats": []}
+
+
+def _migrate_legacy_pool() -> None:
+    """Split the old all-regions JSON once so normal reads stay region-bounded."""
+    meta = _pool_meta()
+    if meta.get("split_pool_v1"):
+        return
+    legacy_path = _path("candidate_pool.json")
+    if not legacy_path.exists():
+        meta["split_pool_v1"] = True
+        _save_json("candidate_pool_meta.json", meta)
+        return
+    legacy = _pool_data()
+    regions = legacy.get("regions") or {}
+    for region, row in regions.items():
+        if not isinstance(row, dict):
+            continue
+        _save_json(_region_pool_name(str(region).upper()), row)
+        counts = meta.get("region_counts")
+        if not isinstance(counts, dict):
+            counts = {}
+        counts[str(region).upper()] = {
+            "count": int(row.get("count") or len(row.get("candidates") or [])),
+            "updated_at": row.get("updated_at"),
+        }
+        meta["region_counts"] = counts
+    meta["pool_updated_at"] = legacy.get("updated_at")
+    meta["split_pool_v1"] = True
+    _save_json("candidate_pool_meta.json", meta)
+    del legacy
+    _release_memory()
 
 
 def _verified_data() -> dict:
@@ -676,35 +785,36 @@ async def get_pool_targets(region: str = "HK") -> List[str]:
     """Return the current candidate pool as endpoint strings without sending it through the browser."""
     region = str(region or "HK").upper()
     catalog = await _region_catalog()
-    pool = _pool_data()
     targets: List[str] = []
     if region == "ALL":
-        for code, region_row in (catalog.get("regions") or {}).items():
+        for region_row in (catalog.get("regions") or {}).values():
             targets.extend(str(value).strip() for value in region_row.get("candidates", []) if str(value).strip())
-        for region_data in (pool.get("regions") or {}).values():
+        for code in (catalog.get("regions") or {}):
+            region_data = _load_region_pool(code, catalog)
             targets.extend(
                 str(row.get("target") or "").strip()
                 for row in region_data.get("candidates", [])
                 if str(row.get("target") or "").strip()
             )
-        return _dedupe(targets)
+            del region_data
+        result = _dedupe(targets)
+        del targets
+        _release_memory()
+        return result
     if not re.fullmatch(r"[A-Z]{2}", region) or region not in (catalog.get("regions") or {}):
         raise ValueError("unsupported region")
-    data = pool.get("regions", {}).get(region) or _catalog_pool(region, catalog)
-    return _dedupe([
+    data = _load_region_pool(region, catalog)
+    result = _dedupe([
         str(row.get("target") or "").strip()
         for row in data.get("candidates", [])
         if str(row.get("target") or "").strip()
     ])
+    del data
+    _release_memory()
+    return result
 
 
-async def refresh_region(region: str) -> dict:
-    region = str(region or "HK").upper()
-    if not re.fullmatch(r"[A-Z]{2}", region):
-        raise ValueError("unsupported region")
-    catalog = await _region_catalog()
-    if region not in (catalog.get("regions") or {}):
-        raise ValueError("该地区当前没有候选 IP")
+async def _build_region_data(region: str, catalog: dict) -> dict:
     source_rows = await _region_sources(region)
     merged: Dict[str, dict] = {}
     seen = set()
@@ -727,12 +837,26 @@ async def refresh_region(region: str) -> dict:
                 seen.add(key)
                 contributed += 1
         stats.append({k: source.get(k) for k in ("name", "count", "status", "ms")} | {"contributed": contributed})
+        # The source's potentially huge item list is no longer needed once merged.
+        source["items"] = []
     candidates = list(merged.values()) if MAX_PER_REGION <= 0 else list(merged.values())[:MAX_PER_REGION]
-    pool = _pool_data()
-    pool["regions"][region] = {"updated_at": _now(), "count": len(candidates), "candidates": candidates, "source_stats": stats}
-    pool["updated_at"] = _now()
-    _save_json("candidate_pool.json", pool)
-    return pool["regions"][region]
+    data = {"updated_at": _now(), "count": len(candidates), "candidates": candidates, "source_stats": stats}
+    del source_rows, merged, seen
+    _release_memory()
+    return data
+
+
+async def refresh_region(region: str) -> dict:
+    region = str(region or "HK").upper()
+    if not re.fullmatch(r"[A-Z]{2}", region):
+        raise ValueError("unsupported region")
+    catalog = await _region_catalog()
+    if region not in (catalog.get("regions") or {}):
+        raise ValueError("该地区当前没有候选 IP")
+    data = await _build_region_data(region, catalog)
+    _save_json(_region_pool_name(region), data)
+    _record_region_meta(region, data)
+    return data
 
 
 async def refresh_all() -> dict:
@@ -740,13 +864,22 @@ async def refresh_all() -> dict:
     summary = {"catalog_regions": len(catalog.get("regions") or {})}
     for region in REGIONS:
         try:
-            data = await refresh_region(region)
+            if region not in (catalog.get("regions") or {}):
+                raise ValueError("该地区当前没有候选 IP")
+            data = await _build_region_data(region, catalog)
+            _save_json(_region_pool_name(region), data)
+            _record_region_meta(region, data)
             summary[region] = {"count": data.get("count", 0), "updated_at": data.get("updated_at")}
+            del data
+            _release_memory()
         except Exception as exc:
             summary[region] = {"count": 0, "error": str(exc)}
-    meta = _load_json("candidate_pool_meta.json", {})
+            _release_memory()
+    meta = _pool_meta()
     meta["last_refresh_at"] = _now()
+    meta["split_pool_v1"] = True
     _save_json("candidate_pool_meta.json", meta)
+    _release_memory()
     return summary
 
 
@@ -758,7 +891,7 @@ async def recheck_region(region: str, limit: Optional[int] = None) -> dict:
     if not _DEFAULT_SNI:
         raise RuntimeError("EDT 自动复检缺少检测 SNI")
     region = region.upper()
-    pool = _pool_data().get("regions", {}).get(region) or {}
+    pool = _load_region_pool(region)
     candidates = [row.get("target") for row in pool.get("candidates", []) if row.get("target")]
     candidates = candidates[: max(1, min(int(limit or AUTO_RECHECK_LIMIT), AUTO_RECHECK_LIMIT))]
     sem = asyncio.Semaphore(50)
@@ -830,12 +963,12 @@ async def api_candidate_regions(request: Request) -> dict:
         catalog = await _region_catalog()
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"地区目录读取失败：{exc}")
-    pool = _pool_data()
-    pool_regions = pool.get("regions") or {}
+    meta = _pool_meta()
+    region_counts = meta.get("region_counts") if isinstance(meta.get("region_counts"), dict) else {}
     rows = []
     for code, data in (catalog.get("regions") or {}).items():
         catalog_count = int(data.get("count") or 0)
-        pool_row = pool_regions.get(code) or {}
+        pool_row = region_counts.get(code) if isinstance(region_counts.get(code), dict) else {}
         pool_count = int(pool_row.get("count") or 0)
         count = pool_count if pool_count > 0 else catalog_count
         if count <= 0:
@@ -851,7 +984,7 @@ async def api_candidate_regions(request: Request) -> dict:
     return {
         "regions": rows,
         "updated_at": catalog.get("updated_at"),
-        "pool_updated_at": pool.get("updated_at"),
+        "pool_updated_at": meta.get("pool_updated_at"),
     }
 
 
@@ -859,40 +992,64 @@ async def api_candidate_regions(request: Request) -> dict:
 async def api_pool(request: Request, region: str = "HK", preview_limit: int = 300) -> dict:
     _auth(request)
     region = region.upper()
-    pool = _pool_data()
+    preview_limit = max(0, min(int(preview_limit or 0), 1000))
     verified = _verified_data()
     catalog = await _region_catalog()
+
     if region == "ALL":
-        merged: Dict[str, dict] = {}
+        seen: set[str] = set()
+        preview: List[dict] = []
+        preview_by_key: Dict[str, dict] = {}
         stats: Dict[str, dict] = {}
         updated_values: List[float] = []
         master_count = 0
+
+        def add_preview(target: str, sources: List[str], hints: List[str], source: Optional[str] = None) -> bool:
+            key = str(target or "").strip().lower()
+            if not key:
+                return False
+            is_new = key not in seen
+            if is_new:
+                seen.add(key)
+            item = preview_by_key.get(key)
+            if item is None and is_new and len(preview) < preview_limit:
+                item = {"target": target, "sources": [], "region_hints": []}
+                if source:
+                    item["source"] = source
+                preview.append(item)
+                preview_by_key[key] = item
+            if item is not None:
+                for value in sources:
+                    if value not in item["sources"]:
+                        item["sources"].append(value)
+                for value in hints:
+                    if value not in item["region_hints"]:
+                        item["region_hints"].append(value)
+            return is_new
+
         for code, region_row in (catalog.get("regions") or {}).items():
             for target in region_row.get("candidates", []):
-                key = str(target).lower()
-                if key not in merged:
-                    merged[key] = {"target": target, "sources": ["NiREvil 全地区"], "region_hints": [code]}
+                if add_preview(str(target), ["NiREvil 全地区"], [code], "NiREvil 全地区"):
                     master_count += 1
         if catalog.get("updated_at"):
             updated_values.append(float(catalog["updated_at"]))
-        stats["NiREvil 全地区"] = {"name": "NiREvil 全地区", "count": master_count, "contributed": master_count, "ms": 0, "status": "ok"}
-        for code, region_data in (pool.get("regions") or {}).items():
+        stats["NiREvil 全地区"] = {
+            "name": "NiREvil 全地区", "count": master_count,
+            "contributed": master_count, "ms": 0, "status": "ok",
+        }
+
+        for code in (catalog.get("regions") or {}):
+            region_data = _load_region_pool(code, catalog)
             if region_data.get("updated_at"):
                 updated_values.append(float(region_data["updated_at"]))
             for row in region_data.get("candidates", []):
                 target = str(row.get("target") or "").strip()
-                if not target:
-                    continue
-                key = target.lower()
-                if key not in merged:
-                    merged[key] = {"target": target, "sources": [], "region_hints": []}
-                item = merged[key]
-                for source in row.get("sources", []):
-                    if source not in item["sources"]:
-                        item["sources"].append(source)
-                for hint in row.get("region_hints", []):
-                    if hint not in item["region_hints"]:
-                        item["region_hints"].append(hint)
+                add_preview(
+                    target,
+                    list(row.get("sources") or []),
+                    list(row.get("region_hints") or []),
+                    row.get("source"),
+                )
             for row in region_data.get("source_stats", []):
                 name = str(row.get("name") or "未命名来源")
                 if name not in stats:
@@ -903,21 +1060,26 @@ async def api_pool(request: Request, region: str = "HK", preview_limit: int = 30
                 item["ms"] = round(float(item.get("ms") or 0) + float(row.get("ms") or 0), 1)
                 if row.get("status") != "ok":
                     item["status"] = row.get("status") or "失败"
-        data = {
-            "count": len(merged),
-            "candidates": list(merged.values()),
+            del region_data
+            _release_memory()
+
+        pool_view = {
+            "count": len(seen),
+            "candidates": preview,
             "source_stats": list(stats.values()),
             "updated_at": max(updated_values) if updated_values else None,
         }
+        del seen, preview_by_key, stats
+        _release_memory()
     else:
         if not re.fullmatch(r"[A-Z]{2}", region) or region not in (catalog.get("regions") or {}):
             raise HTTPException(status_code=400, detail="unsupported region")
-        data = pool.get("regions", {}).get(region) or _catalog_pool(region, catalog)
-    # The browser only needs a short preview. Keep the complete pool server-side
-    # so large regions do not transfer/render thousands of endpoints on every page load.
-    preview_limit = max(0, min(int(preview_limit or 0), 1000))
-    pool_view = dict(data)
-    pool_view["candidates"] = list(data.get("candidates") or [])[:preview_limit]
+        data = _load_region_pool(region, catalog)
+        pool_view = dict(data)
+        pool_view["candidates"] = list(data.get("candidates") or [])[:preview_limit]
+        del data
+        _release_memory()
+
     verified_row = verified.get("regions", {}).get(region) or {"final_available": 0, "results": [], "updated_at": None}
     verified_view = dict(verified_row)
     verified_view["results"] = list(verified_row.get("results") or [])[: min(preview_limit, 100)]
@@ -925,7 +1087,7 @@ async def api_pool(request: Request, region: str = "HK", preview_limit: int = 30
         "region": region,
         "pool": pool_view,
         "verified": verified_view,
-        "meta": _load_json("candidate_pool_meta.json", {}),
+        "meta": _pool_meta(),
         "refresh_interval": REFRESH_INTERVAL,
         "recheck_interval": RECHECK_INTERVAL,
     }
@@ -1066,6 +1228,9 @@ def configure(
 
     async def startup() -> None:
         global _BACKGROUND_TASK
+        # v1.1.0 originally stored every region in one large JSON file. Split it
+        # once at startup so normal reads and refreshes never hydrate all regions.
+        await asyncio.to_thread(_migrate_legacy_pool)
         if _BACKGROUND_TASK is None or _BACKGROUND_TASK.done():
             _BACKGROUND_TASK = asyncio.create_task(_background_loop())
 
