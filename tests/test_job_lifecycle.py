@@ -160,6 +160,43 @@ class JobLifecycleTests(unittest.TestCase):
         self.assertEqual(stub["available"], 1)
         self.assertTrue(stub["resume_available"])
 
+    def test_runtime_interruption_is_resumable_after_restart(self) -> None:
+        job = make_job("787878787878", state="runtime_checking", total=8)
+        job["completed"] = 8
+        job["runtime_total"] = 3
+        job["runtime_completed"] = 1
+        for index, row in enumerate(job["results"]):
+            row["state"] = "checked"
+            row["available"] = index < 3
+            if index == 0:
+                row["edt_available"] = True
+                row["final_available"] = True
+        app.persist_job(job)
+
+        stub = app.read_job_stub(app.job_path(job["id"]))
+
+        self.assertIsNotNone(stub)
+        self.assertEqual(stub["state"], "interrupted")
+        self.assertEqual(stub["interrupted_stage"], "runtime_checking")
+        self.assertTrue(stub["resume_available"])
+
+    def test_existing_interrupted_runtime_job_recovers_resume_flag(self) -> None:
+        job = make_job("797979797979", state="interrupted", total=8)
+        job["interrupted_stage"] = "runtime_checking"
+        job["resume_available"] = False
+        job["completed"] = 5
+        for index, row in enumerate(job["results"]):
+            row["state"] = "checked" if index < 5 else "pending"
+            row["available"] = index < 2
+        app.persist_job(job)
+
+        stub = app.read_job_stub(app.job_path(job["id"]))
+
+        self.assertIsNotNone(stub)
+        self.assertEqual(stub["state"], "interrupted")
+        self.assertEqual(stub["interrupted_stage"], "runtime_checking")
+        self.assertTrue(stub["resume_available"])
+
     def test_large_interrupted_job_disables_resume_without_hydrate(self) -> None:
         job = make_job("888888888888", state="checking", total=app.MAX_RESUME_ITEMS + 1)
         job["interrupted_stage"] = "checking"
