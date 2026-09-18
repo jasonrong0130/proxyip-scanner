@@ -196,6 +196,85 @@ class JobStateMachineRegressionTests(unittest.TestCase):
         self.assertEqual(job["final_available"], 2)
         self.assertLessEqual(job["runtime_completed"], job["runtime_total"])
 
+    def test_resume_endpoint_finishes_partial_edt_without_recounting_completed_rows(self):
+        async def scenario():
+            job = make_job("bb22bb22bb22", state="interrupted", total=3)
+            job["interrupted_stage"] = "runtime_checking"
+            job["resume_available"] = True
+            job["finished_at"] = app.now()
+            job["settings"]["edt_runtime"] = {"enabled": True, "concurrency": 2}
+            job["results"] = [
+                {
+                    "candidate": "8.8.8.1:443",
+                    "host": "8.8.8.1",
+                    "port": 443,
+                    "state": "checked",
+                    "available": True,
+                    "edt_available": True,
+                    "final_available": True,
+                },
+                {
+                    "candidate": "8.8.8.2:443",
+                    "host": "8.8.8.2",
+                    "port": 443,
+                    "state": "checked",
+                    "available": True,
+                    "edt_available": False,
+                    "final_available": False,
+                },
+                {
+                    "candidate": "8.8.8.3:443",
+                    "host": "8.8.8.3",
+                    "port": 443,
+                    "state": "checked",
+                    "available": True,
+                    "edt_available": None,
+                    "final_available": None,
+                },
+            ]
+            job["targets"] = [row["candidate"] for row in job["results"]]
+            app.rebuild_job_counters(job)
+            job["runtime_total"] = 3
+            app.persist_job(job)
+            app.JOBS[job["id"]] = app.read_job_stub(app.job_path(job["id"]))
+
+            calls = []
+            original_check = app.check_edt_runtime_selected
+            original_enrich = app.enrich_result
+            original_web, original_csrf = self._without_auth()
+
+            async def fake_runtime(candidate, *args, **kwargs):
+                calls.append(candidate)
+                return {"ok": True, "ms": 1.0}
+
+            async def fake_enrich(row, data_dir):
+                return row
+
+            app.check_edt_runtime_selected = fake_runtime
+            app.enrich_result = fake_enrich
+            try:
+                response = await app.resume_interrupted_scan(job["id"], FakeRequest({}))
+                self.assertTrue(response["ok"])
+                running = app.JOBS[job["id"]]
+                task = running.get("_task")
+                self.assertIsNotNone(task)
+                await task
+                final = app.hydrate_job(job["id"])
+            finally:
+                app.check_edt_runtime_selected = original_check
+                app.enrich_result = original_enrich
+                app.require_web_session = original_web
+                app.require_csrf = original_csrf
+
+            self.assertEqual(calls, ["8.8.8.3:443"])
+            self.assertEqual(final["state"], "completed")
+            self.assertEqual(final["runtime_total"], 3)
+            self.assertEqual(final["runtime_completed"], 3)
+            self.assertEqual(final["runtime_available"], 2)
+            self.assertEqual(final["final_available"], 2)
+
+        asyncio.run(scenario())
+
     def test_restart_during_speeding_becomes_resumable_speed_pause_not_dead_interruption(self):
         job = make_job("c33333333333", state="speeding", total=3)
         job["speed_total"] = 3
@@ -229,6 +308,88 @@ class JobStateMachineRegressionTests(unittest.TestCase):
 
         self.assertEqual(stub["state"], "purity_paused")
         self.assertIsNone(stub["finished_at"])
+
+    def test_speed_restart_stub_can_hydrate_and_resume_existing_session(self):
+        async def scenario():
+            job = make_job("cc33cc33cc33", state="speeding", total=2)
+            for row in job["results"]:
+                row.update({"state": "checked", "available": True, "host": row["candidate"].split(":")[0], "port": 443})
+            job["speed_total"] = 2
+            job["speed_completed"] = 1
+            job["speed_session"] = {
+                "targets": [row["candidate"] for row in job["results"]],
+                "mode": "quick",
+                "completed": [job["results"][0]["candidate"]],
+                "status": "running",
+            }
+            app.persist_job(job)
+            app.JOBS[job["id"]] = app.read_job_stub(app.job_path(job["id"]))
+
+            calls = []
+            original_runner = app.run_post_speed
+            original_web, original_csrf = self._without_auth()
+
+            async def fake_runner(current, targets, mode):
+                calls.append((set(targets), mode, list((current.get("speed_session") or {}).get("completed") or [])))
+
+            app.run_post_speed = fake_runner
+            try:
+                response = await app.resume_speed(job["id"], FakeRequest({}))
+                self.assertEqual(response["state"], "speeding")
+                task = app.POST_SPEED_TASKS[job["id"]]
+                await task
+            finally:
+                app.run_post_speed = original_runner
+                app.require_web_session = original_web
+                app.require_csrf = original_csrf
+
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][0], {row["candidate"] for row in job["results"]})
+            self.assertEqual(calls[0][1], "quick")
+            self.assertEqual(calls[0][2], [job["results"][0]["candidate"]])
+
+        asyncio.run(scenario())
+
+    def test_purity_restart_stub_can_hydrate_and_resume_existing_session(self):
+        async def scenario():
+            job = make_job("dd44dd44dd44", state="purity_checking", total=2)
+            for row in job["results"]:
+                row.update({"state": "checked", "available": True, "host": row["candidate"].split(":")[0], "port": 443})
+            job["purity_total"] = 2
+            job["purity_completed"] = 1
+            job["purity_session"] = {
+                "targets": [row["candidate"] for row in job["results"]],
+                "concurrency": 2,
+                "completed": [job["results"][0]["candidate"]],
+                "status": "running",
+            }
+            app.persist_job(job)
+            app.JOBS[job["id"]] = app.read_job_stub(app.job_path(job["id"]))
+
+            calls = []
+            original_runner = app.run_post_purity
+            original_web, original_csrf = self._without_auth()
+
+            async def fake_runner(current, targets, concurrency):
+                calls.append((set(targets), concurrency, list((current.get("purity_session") or {}).get("completed") or [])))
+
+            app.run_post_purity = fake_runner
+            try:
+                response = await app.resume_purity(job["id"], FakeRequest({}))
+                self.assertEqual(response["state"], "purity_checking")
+                task = app.PURITY_TASKS[job["id"]]
+                await task
+            finally:
+                app.run_post_purity = original_runner
+                app.require_web_session = original_web
+                app.require_csrf = original_csrf
+
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][0], {row["candidate"] for row in job["results"]})
+            self.assertEqual(calls[0][1], 2)
+            self.assertEqual(calls[0][2], [job["results"][0]["candidate"]])
+
+        asyncio.run(scenario())
 
     def test_second_primary_scan_is_rejected_while_one_is_active(self):
         existing = make_job("e55555555555", state="checking", total=1)
