@@ -294,6 +294,87 @@ class JobStateMachineRegressionTests(unittest.TestCase):
         self.assertEqual(stub["runtime_available"], 55)
         self.assertEqual(stub["final_available"], 55)
 
+    def test_ungraceful_restart_during_edt_preserves_progress_below_checkpoint_batch(self):
+        job = make_job("ab12ab12ab12", state="runtime_checking", total=80)
+        job["settings"]["edt_runtime"] = {"enabled": True, "concurrency": 1}
+        for row in job["results"]:
+            row.update({
+                "host": row["candidate"].split(":")[0],
+                "port": 443,
+                "state": "checked",
+                "available": True,
+                "edt_available": None,
+                "final_available": None,
+            })
+        app.rebuild_job_counters(job)
+        job["runtime_total"] = 80
+
+        # This is the durable snapshot at EDT start.
+        app.persist_job(job)
+
+        # Twelve EDT results finish in memory, but the default checkpoint batch is
+        # larger than twelve. A real hard process loss must not make these rows run
+        # again after restart.
+        for idx in range(12):
+            row = job["results"][idx]
+            row["edt_available"] = (idx % 3 == 0)
+            row["final_available"] = row["edt_available"]
+            app.checkpoint_result(job, idx)
+        app.rebuild_job_counters(job)
+        job["runtime_total"] = 80
+        self.assertEqual(job["runtime_completed"], 12)
+
+        # Simulate abrupt process loss: all in-memory state/buffers disappear.
+        app.JOBS.clear()
+        app.load_job_index()
+        recovered = app.hydrate_job(job["id"])
+
+        self.assertIsNotNone(recovered)
+        self.assertEqual(recovered["state"], "interrupted")
+        self.assertEqual(recovered["interrupted_stage"], "runtime_checking")
+        self.assertTrue(recovered["resume_available"])
+        self.assertEqual(recovered["runtime_total"], 80)
+        self.assertEqual(recovered["runtime_completed"], 12)
+        self.assertEqual(
+            sum(1 for row in recovered["results"] if row.get("edt_available") is None),
+            68,
+        )
+
+    def test_server_shutdown_cancellation_of_runtime_job_is_resumable_not_user_cancelled(self):
+        async def scenario():
+            job = make_job("ac13ac13ac13", state="runtime_checking", total=3)
+            job["settings"]["edt_runtime"] = {"enabled": True, "concurrency": 1}
+            for row in job["results"]:
+                row.update({
+                    "host": row["candidate"].split(":")[0],
+                    "port": 443,
+                    "state": "checked",
+                    "available": True,
+                    "edt_available": None,
+                    "final_available": None,
+                })
+            app.rebuild_job_counters(job)
+            job["runtime_total"] = 3
+            job["state"] = "runtime_checking"
+            app.persist_job(job)
+
+            # A server shutdown cancels the background task without the user first
+            # setting cancel_requested. That must remain distinguishable from the
+            # explicit Stop button.
+            task = asyncio.create_task(app.run_job(job))
+            await asyncio.sleep(0)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+            recovered = app.read_job_stub(app.job_path(job["id"]))
+            self.assertIsNotNone(recovered)
+            self.assertEqual(recovered["state"], "interrupted")
+            self.assertEqual(recovered["interrupted_stage"], "runtime_checking")
+            self.assertTrue(recovered["resume_available"])
+
+        asyncio.run(scenario())
+
     def test_restart_during_speeding_becomes_resumable_speed_pause_not_dead_interruption(self):
         job = make_job("c33333333333", state="speeding", total=3)
         job["speed_total"] = 3
