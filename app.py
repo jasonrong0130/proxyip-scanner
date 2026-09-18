@@ -75,21 +75,6 @@ PRIMARY_SCAN_ACTIVE_STATES = {"queued", "checking", "runtime_checking"}
 JOB_ACTIVE_STATES = PRIMARY_SCAN_ACTIVE_STATES | {"speeding", "purity_checking", "speed_paused", "purity_paused"}
 RESUMABLE_INTERRUPTED_STAGES = {"queued", "checking", "runtime_checking"}
 
-
-def _completed_state_recovery_stage(job: dict) -> Optional[str]:
-    """Detect impossible/stale completed metadata left by older lifecycle bugs."""
-    if str(job.get("state") or "") != "completed":
-        return None
-    total = int(job.get("total") or 0)
-    completed = int(job.get("completed") or 0)
-    runtime_total = int(job.get("runtime_total") or 0)
-    runtime_completed = int(job.get("runtime_completed") or 0)
-    if total > 0 and completed < total:
-        return "checking"
-    if runtime_total > 0 and runtime_completed < runtime_total:
-        return "runtime_checking"
-    return None
-
 TARGET_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 JOBS: Dict[str, dict] = {}
 POST_SPEED_TASKS: Dict[str, asyncio.Task] = {}
@@ -756,17 +741,14 @@ def read_job_stub(path: Path) -> Optional[dict]:
     if resume_blocked:
         stub["resume_available"] = False
 
-    # Stable completed/cancelled history normally has authoritative metadata.
-    # Older lifecycle bugs could however persist "completed" while base or EDT
-    # counters were still partial (for example 7962/7962 base but EDT 55/2487).
-    # Treat that impossible terminal state as crash recovery rather than silently
-    # freezing the task forever.
-    stale_completed_stage = _completed_state_recovery_stage(stub)
+    # Stable completed/cancelled history already has authoritative metadata.
+    # Replaying a large append-only checkpoint for every historical job at
+    # process startup can delay Uvicorn from binding its socket for many seconds.
+    # Only crash/interruption recovery needs the expensive checkpoint summary.
     needs_checkpoint_recovery = (
         not had_meta
         or (not resume_blocked and old_state in PRIMARY_SCAN_ACTIVE_STATES)
         or (not resume_blocked and old_state == "interrupted" and interrupted_stage in RESUMABLE_INTERRUPTED_STAGES)
-        or (not resume_blocked and stale_completed_stage in RESUMABLE_INTERRUPTED_STAGES)
     )
     if needs_checkpoint_recovery and total > 0 and not resume_blocked:
         checkpoint = _checkpoint_summary(job_id, total)
@@ -775,10 +757,6 @@ def read_job_stub(path: Path) -> Optional[dict]:
                 if stub.get(key) != value:
                     stub[key] = value
                     meta_changed = True
-
-    # Re-evaluate after checkpoint replay because the journal may contain newer
-    # counters than metadata.
-    stale_completed_stage = _completed_state_recovery_stage(stub)
 
     if old_state in PRIMARY_SCAN_ACTIVE_STATES:
         stub["interrupted_stage"] = old_state
@@ -806,14 +784,6 @@ def read_job_stub(path: Path) -> Optional[dict]:
         stub["state"] = "purity_paused"
         stub["resume_available"] = False
         stub["finished_at"] = None
-        meta_changed = True
-    elif stale_completed_stage in RESUMABLE_INTERRUPTED_STAGES and total > 0:
-        stub["interrupted_stage"] = stale_completed_stage
-        stub["state"] = "interrupted"
-        stub["resume_available"] = not resume_blocked
-        stub["finished_at"] = stub.get("finished_at") or now()
-        if resume_blocked:
-            stub["resume_available"] = False
         meta_changed = True
     elif old_state == "interrupted" and interrupted_stage in RESUMABLE_INTERRUPTED_STAGES and total > 0:
         # Large interrupted jobs are metadata-only and must never rebuild targets/results.
