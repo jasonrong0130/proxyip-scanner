@@ -319,7 +319,7 @@ class JobStateMachineRegressionTests(unittest.TestCase):
             row = job["results"][idx]
             row["edt_available"] = (idx % 3 == 0)
             row["final_available"] = row["edt_available"]
-            app.checkpoint_result(job, idx)
+            app.checkpoint_result(job, idx, durable=True)
         app.rebuild_job_counters(job)
         job["runtime_total"] = 80
         self.assertEqual(job["runtime_completed"], 12)
@@ -372,6 +372,110 @@ class JobStateMachineRegressionTests(unittest.TestCase):
             self.assertEqual(recovered["state"], "interrupted")
             self.assertEqual(recovered["interrupted_stage"], "runtime_checking")
             self.assertTrue(recovered["resume_available"])
+
+        asyncio.run(scenario())
+
+    def test_paused_primary_releases_full_payload_and_can_be_hydrated_hours_later(self):
+        job = make_job("ad14ad14ad14", state="paused", total=3)
+        job["interrupted_stage"] = "checking"
+        job["resume_available"] = True
+        job["finished_at"] = None
+        job["results"][0].update({"state": "checked", "available": False})
+        job["completed"] = 1
+        app.persist_job(job)
+        app.JOBS[job["id"]] = job
+
+        app.release_job_memory(job)
+
+        stub = app.JOBS[job["id"]]
+        self.assertTrue(stub.get("_lazy"))
+        self.assertEqual(stub["state"], "paused")
+        self.assertNotIn("results", stub)
+        self.assertNotIn("targets", stub)
+
+        restored = app.hydrate_job(job["id"])
+        self.assertEqual(restored["state"], "paused")
+        self.assertEqual(restored["interrupted_stage"], "checking")
+        self.assertTrue(restored["resume_available"])
+        self.assertEqual(len(restored["results"]), 3)
+
+    def test_resume_endpoint_accepts_paused_primary_and_only_runs_remaining_rows(self):
+        async def scenario():
+            job = make_job("ae15ae15ae15", state="paused", total=3)
+            job["interrupted_stage"] = "checking"
+            job["resume_available"] = True
+            job["finished_at"] = None
+            job["results"] = [
+                {"candidate": "8.8.8.1:443", "state": "checked", "available": False},
+                {"candidate": "8.8.8.2:443", "state": "pending", "available": None},
+                {"candidate": "8.8.8.3:443", "state": "pending", "available": None},
+            ]
+            job["targets"] = [row["candidate"] for row in job["results"]]
+            app.rebuild_job_counters(job)
+            app.persist_job(job)
+            app.release_job_memory(job)
+
+            calls = []
+            original_test_one = app.test_one
+            original_enrich = app.enrich_result
+            original_web, original_csrf = self._without_auth()
+
+            async def fake_test_one(raw, *args, **kwargs):
+                calls.append(raw)
+                return {
+                    "candidate": raw,
+                    "host": raw.split(":")[0],
+                    "port": 443,
+                    "state": "checked",
+                    "available": False,
+                }
+
+            async def fake_enrich(row, data_dir):
+                return row
+
+            app.test_one = fake_test_one
+            app.enrich_result = fake_enrich
+            try:
+                response = await app.resume_interrupted_scan(job["id"], FakeRequest({}))
+                self.assertTrue(response["ok"])
+                running = app.JOBS[job["id"]]
+                task = running.get("_task")
+                self.assertIsNotNone(task)
+                await task
+                final = app.hydrate_job(job["id"])
+            finally:
+                app.test_one = original_test_one
+                app.enrich_result = original_enrich
+                app.require_web_session = original_web
+                app.require_csrf = original_csrf
+
+            self.assertEqual(calls, ["8.8.8.2:443", "8.8.8.3:443"])
+            self.assertEqual(final["state"], "completed")
+            self.assertEqual(final["completed"], 3)
+
+        asyncio.run(scenario())
+
+    def test_stopping_a_paused_primary_is_final_and_not_resumable(self):
+        async def scenario():
+            job = make_job("af16af16af16", state="paused", total=3)
+            job["interrupted_stage"] = "checking"
+            job["resume_available"] = True
+            job["finished_at"] = None
+            app.persist_job(job)
+            app.release_job_memory(job)
+
+            original_web, original_csrf = self._without_auth()
+            try:
+                result = await app.cancel_job(job["id"], FakeRequest({}))
+            finally:
+                app.require_web_session = original_web
+                app.require_csrf = original_csrf
+
+            self.assertEqual(result["state"], "cancelled")
+            stopped = app.JOBS[job["id"]]
+            self.assertTrue(stopped.get("_lazy"))
+            self.assertEqual(stopped["state"], "cancelled")
+            self.assertFalse(bool(stopped.get("resume_available")))
 
         asyncio.run(scenario())
 
