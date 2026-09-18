@@ -385,6 +385,53 @@ class JobStateMachineRegressionTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_pause_endpoint_finishes_inflight_probe_then_holds_remaining_work(self):
+        async def scenario():
+            job = make_job("aa10aa10aa10", state="checking", total=3)
+            app.JOBS[job["id"]] = job
+            app.persist_job(job)
+
+            entered = asyncio.Event()
+            calls = []
+            original_test_one = app.test_one
+            original_web, original_csrf = self._without_auth()
+
+            async def fake_test_one(raw, *args, **kwargs):
+                calls.append(raw)
+                entered.set()
+                while not job.get("pause_requested"):
+                    await asyncio.sleep(0)
+                return {
+                    "candidate": raw,
+                    "host": raw.split(":")[0],
+                    "port": 443,
+                    "state": "checked",
+                    "available": False,
+                }
+
+            app.test_one = fake_test_one
+            try:
+                task = asyncio.create_task(app.run_job(job))
+                job["_task"] = task
+                await entered.wait()
+                result = await app.pause_primary_scan(job["id"], FakeRequest({}))
+            finally:
+                app.test_one = original_test_one
+                app.require_web_session = original_web
+                app.require_csrf = original_csrf
+
+            self.assertEqual(result["state"], "paused")
+            self.assertEqual(len(calls), 3 if job["settings"]["check_concurrency"] >= 3 else job["settings"]["check_concurrency"])
+            stub = app.JOBS[job["id"]]
+            self.assertTrue(stub.get("_lazy"))
+            self.assertEqual(stub["state"], "paused")
+            self.assertEqual(stub["interrupted_stage"], "checking")
+            self.assertTrue(stub["resume_available"])
+            self.assertGreaterEqual(stub["completed"], 1)
+            self.assertLessEqual(stub["completed"], 3)
+
+        asyncio.run(scenario())
+
     def test_paused_primary_releases_full_payload_and_can_be_hydrated_hours_later(self):
         job = make_job("ad14ad14ad14", state="paused", total=3)
         job["interrupted_stage"] = "checking"
