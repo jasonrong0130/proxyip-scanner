@@ -1266,6 +1266,11 @@ async def _run_job_impl(job: dict) -> None:
 
     job["state"] = "cancelled" if job.get("cancel_requested") else "completed"
     job["finished_at"] = now()
+    if job.get("candidate_region") and job["state"] == "completed":
+        try:
+            await candidate_pool.record_scan_results(str(job.get("candidate_region")), job.get("results") or [])
+        except Exception:
+            pass
     compact_job_checkpoint(job)
     release_job_memory(job)
 
@@ -1645,9 +1650,9 @@ async def create_job(request: Request) -> dict:
         scan_ports = normalize_scan_ports(body.get("scan_ports"))
         candidate_region = str(body.get("candidate_region") or "").strip().upper()
         if candidate_region:
-            targets = await candidate_pool.get_pool_targets(candidate_region)
+            targets = await candidate_pool.get_scan_targets(candidate_region)
             if not targets:
-                raise ValueError("candidate pool is empty")
+                raise ValueError("候选池当前没有新增或到期复检节点")
         else:
             targets = normalized_targets(body.get("targets"), scan_ports)
         probe_sni = validate_sni(body.get("probe_sni") or DEFAULT_PROBE_SNI)
@@ -1841,6 +1846,13 @@ async def run_post_speed(job: dict, candidate_keys: set[str], mode: str) -> None
         job["speed_error"] = str(exc)[:200]
         job["finished_at"] = now()
     finally:
+        if job.get("candidate_region") and job.get("state") == "completed":
+            try:
+                await candidate_pool.record_scan_results(
+                    str(job.get("candidate_region")), job.get("results") or [], count_check=False
+                )
+            except Exception:
+                pass
         persist_job(job)
         POST_SPEED_TASKS.pop(job.get("id", ""), None)
         release_job_memory(job)
@@ -2074,6 +2086,13 @@ async def run_post_purity(job: dict, candidate_keys: set[str], concurrency: int)
         job["purity_error"] = str(exc)[:200]
         job["finished_at"] = now()
     finally:
+        if job.get("candidate_region") and job.get("state") == "completed":
+            try:
+                await candidate_pool.record_scan_results(
+                    str(job.get("candidate_region")), job.get("results") or [], count_check=False
+                )
+            except Exception:
+                pass
         persist_job(job)
         PURITY_TASKS.pop(job.get("id", ""), None)
         release_job_memory(job)

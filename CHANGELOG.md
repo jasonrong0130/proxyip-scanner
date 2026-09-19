@@ -2,6 +2,24 @@
 
 All notable changes to ProxyIP Scanner are documented here.
 
+## [1.2.0] - 2026-09-19
+
+### Added
+
+- Persistent candidate lifecycle state with first/last seen, check history and verified availability tracking
+- Incremental candidate scanning: new and due endpoints are scanned instead of rescanning the full source pool
+- Backend-only quality scoring using availability, latency, speed, purity/risk and source diversity signals
+- Bounded ASN discovery from verified entry ASNs via RIPEstat announced prefixes
+- Persistent verified pool that survives source refreshes and is updated by primary scan, speed and purity stages
+
+### Improved
+
+- Known-good candidates are rechecked on a slower default cadence while failed candidates use exponential retry backoff
+- Candidate refresh preserves recent historical endpoints instead of replacing the entire region snapshot
+- Low-quality/stale candidates are evicted first when pool limits are reached
+- Background validation processes one bounded batch at a time and rotates regions to control CPU, memory and network load
+- Candidate lifecycle/quality metadata remains server-side and does not change the existing UI
+
 ## [1.1.0] - 2026-09-13
 
 ### Added

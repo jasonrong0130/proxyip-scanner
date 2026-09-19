@@ -20,6 +20,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from edt_runtime import check_edt_runtime
 from geoip import enrich_result
+from quality_score import apply_quality_score
 
 router = APIRouter()
 
@@ -31,12 +32,27 @@ _EDT_CONFIG = None
 _DEFAULT_SNI = ""
 _DEFAULT_PATH = "/cdn-cgi/trace"
 _BACKGROUND_TASK: Optional[asyncio.Task] = None
+_STATE_LOCK = asyncio.Lock()
 _CONFIGURED = False
 
 REFRESH_INTERVAL = max(3600, int(os.environ.get("CANDIDATE_REFRESH_INTERVAL", str(6 * 3600))))
 RECHECK_INTERVAL = max(6 * 3600, int(os.environ.get("CANDIDATE_RECHECK_INTERVAL", str(24 * 3600))))
+AVAILABLE_RECHECK_INTERVAL = max(RECHECK_INTERVAL, int(os.environ.get("CANDIDATE_AVAILABLE_RECHECK_INTERVAL", str(7 * 24 * 3600))))
 MAX_PER_REGION = int(os.environ.get("CANDIDATE_MAX_PER_REGION", "0"))
 AUTO_RECHECK_LIMIT = max(100, min(5000, int(os.environ.get("CANDIDATE_AUTO_RECHECK_LIMIT", "500"))))
+POOL_MAX_PER_REGION = max(1000, min(200000, int(os.environ.get("CANDIDATE_POOL_MAX_PER_REGION", "30000"))))
+VERIFIED_MAX_PER_REGION = max(100, min(50000, int(os.environ.get("CANDIDATE_VERIFIED_MAX_PER_REGION", "5000"))))
+FAILED_RETRY_BASE = max(6 * 3600, int(os.environ.get("CANDIDATE_FAILED_RETRY_BASE", str(24 * 3600))))
+STALE_RETENTION = max(24 * 3600, int(os.environ.get("CANDIDATE_STALE_RETENTION", str(14 * 24 * 3600))))
+SCAN_BATCH_LIMIT = max(100, min(100000, int(os.environ.get("CANDIDATE_SCAN_BATCH_LIMIT", "30000"))))
+ASN_DISCOVERY_ENABLED = str(os.environ.get("CANDIDATE_ASN_DISCOVERY", "1")).strip().lower() in {"1", "true", "yes", "on"}
+ASN_DISCOVERY_MAX_ASNS = max(1, min(32, int(os.environ.get("CANDIDATE_ASN_MAX", "8"))))
+ASN_DISCOVERY_PREFIXES_PER_ASN = max(1, min(128, int(os.environ.get("CANDIDATE_ASN_PREFIXES", "24"))))
+ASN_DISCOVERY_MAX_CANDIDATES = max(100, min(10000, int(os.environ.get("CANDIDATE_ASN_MAX_CANDIDATES", "1500"))))
+ASN_DISCOVERY_PORTS = tuple(
+    int(value.strip()) for value in os.environ.get("CANDIDATE_ASN_PORTS", "443,2053,8443").split(",")
+    if value.strip().isdigit() and 1 <= int(value.strip()) <= 65535
+) or (443,)
 REGIONS = ("HK", "JP", "SG", "KR", "IN", "US", "DE")
 NIREVIL_MASTER_CSV = "https://raw.githubusercontent.com/NiREvil/vless/main/sub/country_proxies/02_proxies.csv"
 XIAOBEI_RAW_COUNTRY = "https://raw.githubusercontent.com/Xiaobei09/proxyip/main/data/download/countries/{region}.txt"
@@ -630,6 +646,53 @@ def _verified_data() -> dict:
     return data
 
 
+def _candidate_due(row: dict, ts: Optional[float] = None) -> bool:
+    ts = float(ts or _now())
+    checked_at = float(row.get("last_checked_at") or 0)
+    if checked_at <= 0:
+        return True
+    if row.get("final_available") is True:
+        return ts - checked_at >= AVAILABLE_RECHECK_INTERVAL
+    failures = max(0, int(row.get("consecutive_failures") or 0))
+    retry_after = min(7 * 24 * 3600, FAILED_RETRY_BASE * (2 ** min(max(failures - 1, 0), 4)))
+    return ts - checked_at >= retry_after
+
+
+def _candidate_keep_key(row: dict) -> tuple:
+    return (
+        1 if row.get("final_available") is True else 0,
+        int(row.get("quality_score") or 0),
+        float(row.get("last_success_at") or 0),
+        float(row.get("last_seen_at") or 0),
+        len(row.get("sources") or []),
+    )
+
+
+def _prune_pool_rows(rows: List[dict]) -> List[dict]:
+    now_ts = _now()
+    retained: List[dict] = []
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("target"):
+            continue
+        # Keep known-good endpoints even if their upstream source temporarily disappears.
+        if row.get("final_available") is not True and now_ts - float(row.get("last_seen_at") or now_ts) > STALE_RETENTION:
+            continue
+        apply_quality_score(row)
+        retained.append(row)
+    retained.sort(key=_candidate_keep_key, reverse=True)
+    return retained[:POOL_MAX_PER_REGION]
+
+
+def _public_candidate(row: dict) -> dict:
+    # Quality/lifecycle data is deliberately backend-only; the existing UI stays unchanged.
+    hidden = {
+        "quality_score", "first_seen_at", "last_seen_at", "last_checked_at", "last_success_at",
+        "last_failure_at", "check_count", "success_count", "failure_count", "consecutive_failures",
+        "avg_mbps", "purity_score", "risk_score", "is_residential", "is_idc",
+    }
+    return {key: value for key, value in row.items() if key not in hidden}
+
+
 async def _run_source(name: str, region_hint: Optional[str], loader: Callable[[], Awaitable[List[str]]]) -> dict:
     started = _now()
     try:
@@ -671,6 +734,8 @@ async def _region_sources(region: str) -> List[dict]:
         work.append(_run_source("EDT 动态域名组（全球补充）", None, lambda: _resolve_domains(DYNAMIC_DOMAINS)))
     if region == "US" and ENABLE_LEILAOMI:
         work.append(_run_source("LeilaoMi all/best", "US", _fetch_leilaomi))
+    if ASN_DISCOVERY_ENABLED:
+        work.append(_run_source("ASN 后台发现", region, lambda region=region: _discover_asn_candidates(region)))
 
     custom_rows = _custom_sources()
     custom_indexes = []
@@ -781,6 +846,74 @@ async def _fetch_leilaomi() -> List[str]:
     return _parse_loose("\n".join(texts))
 
 
+async def _fetch_ripe_asn_prefixes(asn: Any) -> List[str]:
+    digits = re.sub(r"\D", "", str(asn or ""))
+    if not digits or not (1 <= int(digits) <= 4294967295):
+        return []
+    url = f"https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS{digits}&sourceapp=proxyip-scanner"
+    data = json.loads(await _fetch_text(url))
+    prefixes: List[str] = []
+    for item in ((data.get("data") or {}).get("prefixes") or []):
+        value = str((item or {}).get("prefix") or "").strip()
+        try:
+            network = ipaddress.ip_network(value, strict=False)
+        except ValueError:
+            continue
+        if network.version == 4 and network.is_global:
+            prefixes.append(str(network))
+    return _dedupe(prefixes)[:ASN_DISCOVERY_PREFIXES_PER_ASN]
+
+
+def _sample_prefix_targets(prefixes: List[str], budget: int) -> List[str]:
+    out: List[str] = []
+    for prefix in prefixes:
+        if len(out) >= budget:
+            break
+        try:
+            network = ipaddress.ip_network(prefix, strict=False)
+        except ValueError:
+            continue
+        if network.version != 4 or not network.is_global or network.num_addresses <= 2:
+            continue
+        usable = network.num_addresses - 2
+        # Bounded deterministic sampling keeps ASN discovery useful without attempting a full ASN sweep.
+        samples = min(16, usable)
+        for index in range(samples):
+            offset = 1 + ((index + 1) * usable // (samples + 1))
+            ip = str(network.network_address + offset)
+            for port in ASN_DISCOVERY_PORTS:
+                value = _normalize(ip, port)
+                if value:
+                    out.append(value)
+                    if len(out) >= budget:
+                        return _dedupe(out)
+    return _dedupe(out)
+
+
+async def _discover_asn_candidates(region: str) -> List[str]:
+    if not ASN_DISCOVERY_ENABLED:
+        return []
+    verified = _verified_data().get("regions", {}).get(region) or {}
+    results = list(verified.get("results") or [])
+    results.sort(key=lambda row: int(row.get("quality_score") or 0), reverse=True)
+    asns: List[str] = []
+    for row in results:
+        asn = row.get("entry_asn") or ((row.get("entry_geo") or {}).get("asn") if isinstance(row.get("entry_geo"), dict) else None)
+        digits = re.sub(r"\D", "", str(asn or ""))
+        if digits and digits not in asns:
+            asns.append(digits)
+        if len(asns) >= ASN_DISCOVERY_MAX_ASNS:
+            break
+    if not asns:
+        return []
+    prefix_rows = await asyncio.gather(*(_fetch_ripe_asn_prefixes(asn) for asn in asns), return_exceptions=True)
+    prefixes: List[str] = []
+    for row in prefix_rows:
+        if not isinstance(row, Exception):
+            prefixes.extend(row)
+    return _sample_prefix_targets(_dedupe(prefixes), ASN_DISCOVERY_MAX_CANDIDATES)
+
+
 async def get_pool_targets(region: str = "HK") -> List[str]:
     """Return the current candidate pool as endpoint strings without sending it through the browser."""
     region = str(region or "HK").upper()
@@ -814,6 +947,53 @@ async def get_pool_targets(region: str = "HK") -> List[str]:
     return result
 
 
+async def get_scan_targets(region: str = "HK", limit: Optional[int] = None, force: bool = False) -> List[str]:
+    """Return only new/due candidates, prioritising never-scanned endpoints."""
+    region = str(region or "HK").upper()
+    cap = max(1, min(int(limit or SCAN_BATCH_LIMIT), SCAN_BATCH_LIMIT))
+    ts = _now()
+    selected: List[tuple] = []
+
+    def collect(rows: List[dict]) -> None:
+        for row in rows:
+            target = str(row.get("target") or "").strip()
+            if not target or not (force or _candidate_due(row, ts)):
+                continue
+            selected.append((
+                0 if not row.get("last_checked_at") else 1,
+                float(row.get("last_checked_at") or 0),
+                -len(row.get("sources") or []),
+                target,
+            ))
+        if len(selected) > cap * 2:
+            selected.sort()
+            del selected[cap:]
+
+    if region == "ALL":
+        meta = _pool_meta()
+        codes = list((meta.get("region_counts") or {}).keys()) or list(REGIONS)
+        for code in codes:
+            if not _path(_region_pool_name(code)).exists():
+                continue
+            data = _load_region_pool(code)
+            collect(list(data.get("candidates") or []))
+            del data
+            _release_memory()
+    else:
+        if not re.fullmatch(r"[A-Z]{2}", region):
+            raise ValueError("unsupported region")
+        if _path(_region_pool_name(region)).exists():
+            data = _load_region_pool(region)
+        else:
+            data = await refresh_region(region)
+        collect(list(data.get("candidates") or []))
+        del data
+        _release_memory()
+
+    selected.sort()
+    return _dedupe([item[3] for item in selected])[:cap]
+
+
 async def _build_region_data(region: str, catalog: dict) -> dict:
     source_rows = await _region_sources(region)
     merged: Dict[str, dict] = {}
@@ -837,11 +1017,42 @@ async def _build_region_data(region: str, catalog: dict) -> dict:
                 seen.add(key)
                 contributed += 1
         stats.append({k: source.get(k) for k in ("name", "count", "status", "ms")} | {"contributed": contributed})
-        # The source's potentially huge item list is no longer needed once merged.
         source["items"] = []
-    candidates = list(merged.values()) if MAX_PER_REGION <= 0 else list(merged.values())[:MAX_PER_REGION]
-    data = {"updated_at": _now(), "count": len(candidates), "candidates": candidates, "source_stats": stats}
-    del source_rows, merged, seen
+
+    ts = _now()
+    previous_data = _load_region_pool(region)
+    previous_rows = list(previous_data.get("candidates") or [])
+    previous = {str(row.get("target") or "").lower(): row for row in previous_rows if row.get("target")}
+    state_fields = (
+        "first_seen_at", "last_checked_at", "last_success_at", "last_failure_at",
+        "check_count", "success_count", "failure_count", "consecutive_failures",
+        "available", "final_available", "tcp_ms", "tls_ms", "quality_score",
+        "avg_mbps", "purity_score", "risk_score", "is_residential", "is_idc",
+    )
+    candidates: List[dict] = []
+    for key, row in merged.items():
+        old = previous.get(key)
+        if old:
+            for field in state_fields:
+                if field in old:
+                    row[field] = old[field]
+            row["first_seen_at"] = float(old.get("first_seen_at") or ts)
+        else:
+            row["first_seen_at"] = ts
+        row["last_seen_at"] = ts
+        candidates.append(row)
+
+    for key, old in previous.items():
+        if key in merged:
+            continue
+        if old.get("final_available") is True or ts - float(old.get("last_seen_at") or ts) <= STALE_RETENTION:
+            candidates.append(old)
+
+    candidates = _prune_pool_rows(candidates)
+    if MAX_PER_REGION > 0:
+        candidates = candidates[:MAX_PER_REGION]
+    data = {"updated_at": ts, "count": len(candidates), "candidates": candidates, "source_stats": stats}
+    del source_rows, merged, seen, previous_data, previous_rows, previous
     _release_memory()
     return data
 
@@ -853,10 +1064,11 @@ async def refresh_region(region: str) -> dict:
     catalog = await _region_catalog()
     if region not in (catalog.get("regions") or {}):
         raise ValueError("该地区当前没有候选 IP")
-    data = await _build_region_data(region, catalog)
-    _save_json(_region_pool_name(region), data)
-    _record_region_meta(region, data)
-    return data
+    async with _STATE_LOCK:
+        data = await _build_region_data(region, catalog)
+        _save_json(_region_pool_name(region), data)
+        _record_region_meta(region, data)
+        return data
 
 
 async def refresh_all() -> dict:
@@ -866,9 +1078,10 @@ async def refresh_all() -> dict:
         try:
             if region not in (catalog.get("regions") or {}):
                 raise ValueError("该地区当前没有候选 IP")
-            data = await _build_region_data(region, catalog)
-            _save_json(_region_pool_name(region), data)
-            _record_region_meta(region, data)
+            async with _STATE_LOCK:
+                data = await _build_region_data(region, catalog)
+                _save_json(_region_pool_name(region), data)
+                _record_region_meta(region, data)
             summary[region] = {"count": data.get("count", 0), "updated_at": data.get("updated_at")}
             del data
             _release_memory()
@@ -883,7 +1096,135 @@ async def refresh_all() -> dict:
     return summary
 
 
-async def recheck_region(region: str, limit: Optional[int] = None) -> dict:
+async def record_scan_results(region: str, results: List[dict], count_check: bool = True) -> dict:
+    """Merge scan outcomes into split lifecycle storage and the verified pool."""
+    region = str(region or "").upper()
+    if region != "ALL" and not re.fullmatch(r"[A-Z]{2}", region):
+        raise ValueError("unsupported region")
+    result_map = {
+        str(row.get("candidate") or row.get("input") or "").strip().lower(): row
+        for row in (results or [])
+        if isinstance(row, dict) and str(row.get("candidate") or row.get("input") or "").strip()
+    }
+    if not result_map:
+        return {"tested": 0, "verified": 0}
+
+    ts = _now()
+    total_touched = 0
+    async with _STATE_LOCK:
+        verified = _verified_data()
+        meta = _pool_meta()
+        if region == "ALL":
+            region_codes = list((meta.get("region_counts") or {}).keys()) or list(REGIONS)
+        else:
+            region_codes = [region]
+
+        for code in region_codes:
+            pool_path = _path(_region_pool_name(code))
+            if not pool_path.exists():
+                continue
+            region_data = _load_region_pool(code)
+            candidates = list(region_data.get("candidates") or [])
+            existing_verified = ((verified.get("regions") or {}).get(code) or {}).get("results") or []
+            verified_map = {
+                str(row.get("candidate") or row.get("input") or "").strip().lower(): row
+                for row in existing_verified
+                if isinstance(row, dict) and str(row.get("candidate") or row.get("input") or "").strip()
+            }
+
+            touched = 0
+            base_available = 0
+            for candidate in candidates:
+                key = str(candidate.get("target") or "").strip().lower()
+                result = result_map.get(key)
+                if result is None:
+                    continue
+                touched += 1
+                total_touched += 1
+                final_ok = result.get("final_available") is True if "final_available" in result else result.get("available") is True
+                candidate["available"] = result.get("available") is True
+                candidate["final_available"] = final_ok
+
+                if count_check:
+                    candidate["last_checked_at"] = ts
+                    candidate["check_count"] = int(candidate.get("check_count") or 0) + 1
+                    if final_ok:
+                        candidate["success_count"] = int(candidate.get("success_count") or 0) + 1
+                        candidate["consecutive_failures"] = 0
+                        candidate["last_success_at"] = ts
+                    else:
+                        candidate["failure_count"] = int(candidate.get("failure_count") or 0) + 1
+                        candidate["consecutive_failures"] = int(candidate.get("consecutive_failures") or 0) + 1
+                        candidate["last_failure_at"] = ts
+
+                for field in ("tcp_ms", "tls_ms"):
+                    if result.get(field) is not None:
+                        candidate[field] = result.get(field)
+                speed = result.get("speed") or {}
+                if isinstance(speed, dict) and speed.get("avg_mbps") is not None:
+                    candidate["avg_mbps"] = speed.get("avg_mbps")
+                purity = result.get("purity") or {}
+                if isinstance(purity, dict):
+                    for source_field in ("purity_score", "risk_score", "is_residential", "is_idc"):
+                        if purity.get(source_field) is not None:
+                            candidate[source_field] = purity.get(source_field)
+
+                if result.get("available") is True:
+                    base_available += 1
+                apply_quality_score(candidate)
+                if final_ok:
+                    item = dict(result)
+                    item["quality_score"] = int(candidate.get("quality_score") or 0)
+                    item["last_verified_at"] = ts
+                    verified_map[key] = item
+                else:
+                    verified_map.pop(key, None)
+
+            if not touched:
+                del region_data, candidates, verified_map
+                _release_memory()
+                continue
+
+            candidates = _prune_pool_rows(candidates)
+            region_data["candidates"] = candidates
+            region_data["count"] = len(candidates)
+            region_data["updated_at"] = ts
+            _save_json(_region_pool_name(code), region_data)
+            _record_region_meta(code, region_data)
+
+            verified_rows = list(verified_map.values())
+            verified_rows.sort(
+                key=lambda row: (
+                    int(row.get("quality_score") or 0),
+                    -float(row.get("tcp_ms") if isinstance(row.get("tcp_ms"), (int, float)) else 1e9),
+                    float(row.get("last_verified_at") or 0),
+                ),
+                reverse=True,
+            )
+            verified_rows = verified_rows[:VERIFIED_MAX_PER_REGION]
+            previous = (verified.get("regions") or {}).get(code) or {}
+            verified["regions"][code] = {
+                "updated_at": ts,
+                "tested": touched if count_check else int(previous.get("tested") or 0),
+                "tested_total": int(previous.get("tested_total") or 0) + (touched if count_check else 0),
+                "base_available": base_available,
+                "final_available": len(verified_rows),
+                "results": verified_rows,
+            }
+            del region_data, candidates, verified_map, verified_rows
+            _release_memory()
+
+        verified["updated_at"] = ts
+        _save_json("candidate_verified.json", verified)
+        verified_total = sum(
+            int((row or {}).get("final_available") or 0)
+            for row in (verified.get("regions") or {}).values()
+        )
+    _release_memory()
+    return {"tested": total_touched, "verified": verified_total}
+
+
+async def recheck_region(region: str, limit: Optional[int] = None, force: bool = False) -> dict:
     if _PROBE_CALLBACK is None:
         raise RuntimeError("EDT 自动复检探针未配置")
     if _EDT_CONFIG is None or not getattr(_EDT_CONFIG, "configured", False):
@@ -891,45 +1232,61 @@ async def recheck_region(region: str, limit: Optional[int] = None) -> dict:
     if not _DEFAULT_SNI:
         raise RuntimeError("EDT 自动复检缺少检测 SNI")
     region = region.upper()
-    pool = _load_region_pool(region)
-    candidates = [row.get("target") for row in pool.get("candidates", []) if row.get("target")]
-    candidates = candidates[: max(1, min(int(limit or AUTO_RECHECK_LIMIT), AUTO_RECHECK_LIMIT))]
+    cap = max(1, min(int(limit or AUTO_RECHECK_LIMIT), AUTO_RECHECK_LIMIT))
+    candidates = await get_scan_targets(region, cap, force=force)
+    if not candidates:
+        existing = _verified_data().get("regions", {}).get(region) or {}
+        return {
+            "updated_at": existing.get("updated_at"), "tested": 0, "base_available": 0,
+            "final_available": int(existing.get("final_available") or 0), "results": list(existing.get("results") or []),
+        }
     sem = asyncio.Semaphore(50)
 
     async def base_one(target: str) -> dict:
         async with sem:
-            return await _PROBE_CALLBACK(target, _DEFAULT_SNI, _DEFAULT_PATH, True, "", 7.0)
+            try:
+                return await _PROBE_CALLBACK(target, _DEFAULT_SNI, _DEFAULT_PATH, True, "", 7.0)
+            except Exception as exc:
+                return {"candidate": target, "available": False, "final_available": False, "error": str(exc)[:180]}
 
     base_rows = await asyncio.gather(*(base_one(target) for target in candidates))
     base_ok = [row for row in base_rows if row.get("available") is True]
+    for row in base_rows:
+        if row.get("available") is not True:
+            row["final_available"] = False
     runtime_sem = asyncio.Semaphore(10)
 
     async def runtime_one(row: dict) -> dict:
         async with runtime_sem:
-            runtime = await check_edt_runtime(row.get("candidate"), _EDT_CONFIG)
-            row["edt_runtime"] = runtime
-            row["edt_available"] = runtime.get("ok") is True
-            row["final_available"] = row["edt_available"]
-            if row["final_available"]:
-                await enrich_result(row, _DATA_DIR)
+            try:
+                runtime = await check_edt_runtime(row.get("candidate"), _EDT_CONFIG)
+                row["edt_runtime"] = runtime
+                row["edt_available"] = runtime.get("ok") is True
+                row["final_available"] = row["edt_available"]
+                if row["final_available"]:
+                    await enrich_result(row, _DATA_DIR)
+            except Exception as exc:
+                row["edt_available"] = False
+                row["final_available"] = False
+                row["error"] = str(exc)[:180]
             return row
 
     checked = await asyncio.gather(*(runtime_one(row) for row in base_ok))
-    good = [row for row in checked if row.get("final_available") is True]
-    verified = _verified_data()
-    verified["regions"][region] = {
-        "updated_at": _now(),
-        "tested": len(candidates),
-        "base_available": len(base_ok),
-        "final_available": len(good),
-        "results": good,
-    }
-    verified["updated_at"] = _now()
-    _save_json("candidate_verified.json", verified)
+    checked_map = {str(row.get("candidate") or "").lower(): row for row in checked}
+    outcomes = [checked_map.get(str(row.get("candidate") or "").lower(), row) for row in base_rows]
+    await record_scan_results(region, outcomes)
+    verified_row = _verified_data().get("regions", {}).get(region) or {}
     meta = _load_json("candidate_pool_meta.json", {})
     meta["last_recheck_at"] = _now()
+    meta.setdefault("last_recheck_by_region", {})[region] = _now()
     _save_json("candidate_pool_meta.json", meta)
-    return verified["regions"][region]
+    return {
+        "updated_at": verified_row.get("updated_at"),
+        "tested": len(candidates),
+        "base_available": len(base_ok),
+        "final_available": int(verified_row.get("final_available") or 0),
+        "results": list(verified_row.get("results") or []),
+    }
 
 
 async def _background_loop() -> None:
@@ -940,6 +1297,20 @@ async def _background_loop() -> None:
             ts = _now()
             if ts - float(meta.get("last_refresh_at") or 0) >= REFRESH_INTERVAL:
                 await refresh_all()
+                meta = _load_json("candidate_pool_meta.json", {})
+            # Drain one bounded region batch per cycle. New candidates are first,
+            # then due rechecks; this prevents every refresh from rescanning the full pool.
+            if _EDT_CONFIG is not None and getattr(_EDT_CONFIG, "configured", False) and _DEFAULT_SNI:
+                cursor = int(meta.get("recheck_cursor") or 0) % len(REGIONS)
+                for offset in range(len(REGIONS)):
+                    idx = (cursor + offset) % len(REGIONS)
+                    data = await recheck_region(REGIONS[idx], AUTO_RECHECK_LIMIT, force=False)
+                    if int(data.get("tested") or 0) > 0:
+                        meta = _load_json("candidate_pool_meta.json", {})
+                        meta["recheck_cursor"] = (idx + 1) % len(REGIONS)
+                        meta["last_background_recheck_at"] = _now()
+                        _save_json("candidate_pool_meta.json", meta)
+                        break
             await asyncio.sleep(1800)
         except asyncio.CancelledError:
             return
@@ -1076,13 +1447,16 @@ async def api_pool(request: Request, region: str = "HK", preview_limit: int = 30
             raise HTTPException(status_code=400, detail="unsupported region")
         data = _load_region_pool(region, catalog)
         pool_view = dict(data)
-        pool_view["candidates"] = list(data.get("candidates") or [])[:preview_limit]
+        pool_view["candidates"] = [
+            _public_candidate(row)
+            for row in list(data.get("candidates") or [])[:preview_limit]
+        ]
         del data
         _release_memory()
 
     verified_row = verified.get("regions", {}).get(region) or {"final_available": 0, "results": [], "updated_at": None}
     verified_view = dict(verified_row)
-    verified_view["results"] = list(verified_row.get("results") or [])[: min(preview_limit, 100)]
+    verified_view["results"] = [_public_candidate(row) for row in list(verified_row.get("results") or [])[: min(preview_limit, 100)]]
     return {
         "region": region,
         "pool": pool_view,
@@ -1116,7 +1490,7 @@ async def api_recheck(request: Request) -> dict:
     body = await request.json()
     region = str(body.get("region") or "HK").upper()
     try:
-        data = await recheck_region(region, body.get("limit"))
+        data = await recheck_region(region, body.get("limit"), force=True)
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"ok": True, "region": region, **{k: data.get(k) for k in ("tested", "base_available", "final_available", "updated_at")}}
