@@ -447,7 +447,11 @@ async def test_one(raw: str, probe_sni: str, probe_path: str, expect_cloudflare:
 
     probe = await https_probe(host, port, sni, path, timeout)
     reached_cf = cloudflare_reached(probe.get("headers", {})) if probe.get("ok") else False
-    available = bool(probe.get("ok") and (reached_cf if expect_cloudflare else True))
+    # Keep the raw TLS/HTTP reachability separate from Cloudflare admission.
+    # Some EDT/v2rayN usable endpoints are intentionally not Cloudflare-confirmed,
+    # so they must not be discarded before the EDT runtime verification stage.
+    probe_reachable = bool(probe.get("ok"))
+    available = bool(probe_reachable and (reached_cf if expect_cloudflare else True))
     trace_data = parse_trace(probe.get("body", b"")) if probe.get("ok") else {}
     exit_ip = trace_data.get("ip")
 
@@ -476,7 +480,7 @@ async def test_one(raw: str, probe_sni: str, probe_path: str, expect_cloudflare:
 
     return {
         "input": raw, "candidate": normalized, "host": host, "port": port, "sni": sni,
-        "available": available, "cloudflare_reached": reached_cf,
+        "available": available, "probe_reachable": probe_reachable, "cloudflare_reached": reached_cf,
         "generic_ok": generic_ok, "generic_status": generic_status, "generic_error": generic_error,
         "tcp_ms": tcp.get("ms"), "tls_ms": probe.get("tls_ms"), "http_status": probe.get("status"),
         "exit_ip": exit_ip, "country": trace_data.get("loc"), "colo": trace_data.get("colo"),
@@ -1140,7 +1144,10 @@ async def _run_job_impl(job: dict) -> None:
 
     runtime_cfg = settings.get("edt_runtime") or {}
     if runtime_cfg.get("enabled"):
-        runtime_all = [i for i, r in enumerate(job["results"]) if isinstance(r, dict) and r.get("available") is True]
+        # EDT runtime verification must receive every TLS/HTTP reachable target,
+        # not only Cloudflare-confirmed ProxyIP targets. Otherwise a node that
+        # works in EDT/v2rayN but lacks CF headers is filtered out too early.
+        runtime_all = [i for i, r in enumerate(job["results"]) if isinstance(r, dict) and r.get("probe_reachable") is True]
         for row in job["results"]:
             if row.get("available") is not True:
                 row["final_available"] = False
@@ -2314,7 +2321,10 @@ def query_job_results(job: dict, body: dict) -> dict:
         # are visible immediately, even before EDT has finished.
         if row.get("available") is None and row.get("final_available") is None:
             continue
-        if status == "edt_candidate" and row.get("available") is not True:
+        # EDT 候选不是 CF ProxyIP 专属。
+        # 只要节点已经通过基础可达性验证（TCP/TLS/HTTP），就应该进入 EDT 候选池。
+        # CF 标准节点仍通过 row["available"] 区分，不影响 CF 分类。
+        if status == "edt_candidate" and not (row.get("probe_reachable") is True or row.get("available") is True):
             continue
         if status == "available" and row.get("final_available") is not True:
             continue
@@ -2576,7 +2586,7 @@ async def export_csv(job_id: str, request: Request) -> Response:
         raise HTTPException(status_code=404, detail="job not found")
     output = io.StringIO()
     fields = [
-        "IP", "端口", "可用", "Cloudflare可达", "连接延迟(ms)", "TLS延迟(ms)", "HTTP状态",
+        "IP", "端口", "EDT候选", "CF节点", "EDT真实可用", "Cloudflare可达", "连接延迟(ms)", "TLS延迟(ms)", "HTTP状态",
         "出口IP", "出口国家/地区", "Cloudflare机房", "通用SNI可用", "平均速度(Mbps)",
         "最低速度(Mbps)", "最高速度(Mbps)", "错误信息",
     ]
@@ -2587,7 +2597,9 @@ async def export_csv(job_id: str, request: Request) -> Response:
         writer.writerow({
             "IP": row.get("host") or row.get("candidate"),
             "端口": row.get("port"),
-            "可用": "是" if row.get("available") is True else ("否" if row.get("available") is False else ""),
+            "EDT候选": "是" if (row.get("probe_reachable") is True or row.get("available") is True) else ("否" if row.get("probe_reachable") is False else ""),
+            "CF节点": "是" if row.get("available") is True else ("否" if row.get("available") is False else ""),
+            "EDT真实可用": "是" if row.get("edt_available") is True else ("否" if row.get("edt_available") is False else "未验证"),
             "Cloudflare可达": "是" if row.get("cloudflare_reached") is True else ("否" if row.get("cloudflare_reached") is False else ""),
             "连接延迟(ms)": row.get("tcp_ms"),
             "TLS延迟(ms)": row.get("tls_ms"),
@@ -2628,7 +2640,8 @@ async def edt_check(
         str(body.get("generic_sni", "")).strip(),
         clamp_float(body.get("timeout"), DEFAULT_TIMEOUT, 2.0, 30.0),
     )
-    base_available = bool(result.get("available"))
+    # EDT验证不应依赖Cloudflare确认。只要基础TLS/HTTP可达，就允许进入EDT链路验证。
+    base_available = bool(result.get("probe_reachable") is True or result.get("available"))
     runtime_result = None
     if base_available and EDT_RUNTIME_CONFIG.configured:
         runtime_result = await check_edt_runtime(result.get("candidate") or proxyip, EDT_RUNTIME_CONFIG)
