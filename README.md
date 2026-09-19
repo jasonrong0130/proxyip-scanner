@@ -4,11 +4,12 @@
 
 项目以 **VPS 直连扫描** 为核心，不依赖 Cloudflare Worker raw TCP；默认仅监听本机 `127.0.0.1:8788`，适合通过 Cloudflare Tunnel、反向代理或其他受控入口访问。
 
-当前公开版本：**v1.1.0**
+当前公开版本：**v1.2.0**
 
 - [完整安装说明](INSTALL.md)
 - [更新记录](CHANGELOG.md)
 - [安全策略](SECURITY.md)
+- [v1.2.0 Release Notes](docs/release-v1.2.0.md)
 - [v1.1.0 Release Notes](docs/release-v1.1.0.md)
 - [v1.0.0 Release Notes](docs/release-v1.0.0.md)
 - [个人非商业许可](LICENSE)
