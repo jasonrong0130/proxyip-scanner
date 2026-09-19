@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -26,6 +27,32 @@ class V12LifecycleTests(unittest.TestCase):
     def tearDown(self) -> None:
         candidate_pool._DATA_DIR = self.previous_pool_dir
         self.tmp.cleanup()
+
+    def save_verified_fixture(self) -> None:
+        candidate_pool._save_json(
+            "candidate_verified.json",
+            {
+                "updated_at": 1789815311.102502,
+                "regions": {
+                    "HK": {
+                        "updated_at": 1789815311.102502,
+                        "final_available": 1,
+                        "results": [{
+                            "target": "156.244.57.227:443",
+                            "quality_score": 95,
+                            "avg_mbps": 120,
+                            "tcp_ms": 38,
+                            "tls_ms": 50,
+                            "purity": {"network_type": "机房IP", "is_idc": True},
+                            "success_count": 10,
+                            "failure_count": 0,
+                            "check_count": 10,
+                            "last_verified_at": 1789815311.102502,
+                        }],
+                    }
+                },
+            },
+        )
 
     def test_full_scan_runs_in_batches_and_persists_progress(self) -> None:
         async def scenario() -> None:
@@ -218,11 +245,34 @@ class V12LifecycleTests(unittest.TestCase):
         self.assertEqual(verified["regions"]["HK"]["results"][0]["target"], "1.1.1.1:443")
         self.assertTrue((candidate_pool._DATA_DIR / "candidate_verified.json").exists())
 
-    def test_verified_exports_return_txt_and_csv(self) -> None:
-        candidate_pool._save_json(
-            "candidate_verified.json",
-            {"updated_at": 123, "regions": {"HK": {"results": [{"target": "1.1.1.1:443"}]}}},
-        )
+    def test_verified_api_returns_flat_results_matching_total(self) -> None:
+        self.save_verified_fixture()
+        original_require = candidate_pool._REQUIRE_WEB_SESSION
+        candidate_pool._REQUIRE_WEB_SESSION = lambda request: {}
+        try:
+            payload = asyncio.run(candidate_pool.api_verified_pool(FakeRequest()))
+        finally:
+            candidate_pool._REQUIRE_WEB_SESSION = original_require
+
+        self.assertIn("results", payload)
+        self.assertNotIn("regions", payload)
+        self.assertEqual(payload["total"], len(payload["results"]))
+        self.assertEqual(payload["results"], [{
+            "target": "156.244.57.227:443",
+            "region": "HK",
+            "quality_score": 95,
+            "avg_mbps": 120,
+            "tcp_ms": 38,
+            "tls_ms": 50,
+            "purity": "IDC",
+            "success_count": 10,
+            "failure_count": 0,
+            "check_count": 10,
+            "last_verified_at": 1789815311.102502,
+        }])
+
+    def test_verified_exports_use_flat_columns_and_txt_targets_only(self) -> None:
+        self.save_verified_fixture()
         original_require = app.require_web_session
         app.require_web_session = lambda request: {}
         try:
@@ -230,10 +280,33 @@ class V12LifecycleTests(unittest.TestCase):
             csv = asyncio.run(app.export_verified_csv(FakeRequest()))
         finally:
             app.require_web_session = original_require
-        self.assertIn(b"1.1.1.1:443", txt.body)
+
+        txt_rows = txt.body.decode("utf-8").splitlines()
+        self.assertEqual(txt_rows, ["156.244.57.227:443"])
+        self.assertTrue(all(re.fullmatch(r"[^:\s]+:\d+", row) for row in txt_rows))
         self.assertIn("text/plain", txt.media_type)
-        self.assertIn("IP", csv.body.decode("utf-8-sig"))
-        self.assertIn("1.1.1.1:443", csv.body.decode("utf-8-sig"))
+
+        csv_text = csv.body.decode("utf-8-sig")
+        self.assertEqual(
+            csv_text.splitlines()[0],
+            "节点,地区,质量分,速度(Mbps),延迟(ms),纯净度,成功率,更新时间",
+        )
+        self.assertNotIn("1789815311", csv_text)
+        self.assertIn("156.244.57.227:443,HK,95,120,38,IDC,100%", csv_text)
+        self.assertRegex(csv_text, r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
+
+    def test_verified_frontend_uses_results_and_requested_layout(self) -> None:
+        html = (Path(__file__).parents[1] / "static" / "index.html").read_text(encoding="utf-8")
+        verified_script = html[html.index("function renderVerifiedPool"):html.index("$('poolRegion').onchange")]
+        self.assertNotIn("verifiedPreview", html)
+        self.assertNotRegex(verified_script, r"(?:data|verifiedAll)\?*\.regions")
+        self.assertIn("data?.results", verified_script)
+
+        candidate_at = html.index('<div class="c6"><label>候选预览</label>')
+        source_at = html.index('<div class="c6"><label>来源统计</label>')
+        verified_at = html.index('<div class="c12"><div class="section-head"', candidate_at)
+        self.assertLess(candidate_at, source_at)
+        self.assertLess(source_at, verified_at)
 
 
 if __name__ == "__main__":

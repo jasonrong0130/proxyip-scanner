@@ -815,6 +815,42 @@ def _public_candidate(row: dict, include_quality: bool = False) -> dict:
     return {key: value for key, value in row.items() if key not in hidden}
 
 
+def _verified_pool_payload(data: Optional[dict] = None) -> dict:
+    data = data or _verified_data()
+    results = []
+    for region, item in sorted((data.get("regions") or {}).items()):
+        if not isinstance(item, dict):
+            continue
+        for row in item.get("results") or []:
+            if not isinstance(row, dict):
+                continue
+            purity = row.get("purity")
+            if isinstance(purity, dict):
+                network_type = str(purity.get("network_type") or "")
+                if purity.get("is_idc") is True or network_type in {"IDC", "机房IP"}:
+                    purity = "IDC"
+                elif purity.get("is_residential") is True or network_type in {"Residential", "家宽IP", "家宽/运营商IP"}:
+                    purity = "Residential"
+                else:
+                    purity = network_type or "-"
+            elif not purity:
+                purity = "IDC" if row.get("is_idc") is True else ("Residential" if row.get("is_residential") is True else "-")
+            results.append({
+                "target": row.get("target") or row.get("candidate") or "",
+                "region": region,
+                "quality_score": int(row.get("quality_score") or 0),
+                "avg_mbps": row.get("avg_mbps"),
+                "tcp_ms": row.get("tcp_ms"),
+                "tls_ms": row.get("tls_ms"),
+                "purity": purity,
+                "success_count": int(row.get("success_count") or 0),
+                "failure_count": int(row.get("failure_count") or 0),
+                "check_count": int(row.get("check_count") or 0),
+                "last_verified_at": row.get("last_verified_at") or item.get("updated_at") or data.get("updated_at"),
+            })
+    return {"updated_at": data.get("updated_at"), "total": len(results), "results": results}
+
+
 async def _run_source(name: str, region_hint: Optional[str], loader: Callable[[], Awaitable[List[str]]]) -> dict:
     started = _now()
     try:
@@ -1639,20 +1675,7 @@ async def api_pool(request: Request, region: str = "HK", preview_limit: int = 30
 @router.get("/api/candidate-pool/verified")
 async def api_verified_pool(request: Request) -> dict:
     _auth(request)
-    data = _verified_data()
-    rows = []
-    total = 0
-    for region, item in sorted((data.get("regions") or {}).items()):
-        results = list(item.get("results") or []) if isinstance(item, dict) else []
-        count = int(item.get("final_available") or len(results)) if isinstance(item, dict) else len(results)
-        total += count
-        rows.append({
-            "region": region,
-            "count": count,
-            "updated_at": item.get("updated_at") if isinstance(item, dict) else None,
-            "top_nodes": [_public_candidate(row, include_quality=True) for row in results[:5]],
-        })
-    return {"updated_at": data.get("updated_at"), "total": total, "regions": rows}
+    return _verified_pool_payload()
 
 
 @router.get("/api/candidate-pool/quality")
