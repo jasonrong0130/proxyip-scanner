@@ -3,6 +3,7 @@
 No paid API dependency. This score is used internally for pool ordering and cleanup.
 """
 
+import time
 from typing import Any
 
 
@@ -68,6 +69,17 @@ def calculate_quality_score(row: dict) -> int:
     sources = row.get("sources") or []
     if isinstance(sources, list) and len(sources) > 1:
         score += min(8, len(sources) * 2)
+
+    # Long-lived verified nodes should keep a small advantage, but stale
+    # candidates should naturally fall down the pool without immediately being
+    # deleted. This lets incremental scans focus resources on promising nodes.
+    success_age = row.get("last_success_at")
+    if isinstance(success_age, (int, float)):
+        age_days = max(0, (time.time() - float(success_age)) / 86400)
+        if age_days <= 1:
+            score += 5
+        elif age_days > 14:
+            score -= min(10, int(age_days // 7))
 
     return max(0, min(100, int(round(score))))
 
