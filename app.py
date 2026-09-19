@@ -71,6 +71,7 @@ JOB_META_FIELDS = (
     "total", "completed", "available", "final_available", "generic_available", "same_exit",
     "runtime_total", "runtime_completed", "runtime_available",
     "speed_total", "speed_completed", "purity_total", "purity_completed",
+    "candidate_pool_total", "loaded_targets", "filtered_targets", "completed_targets",
 )
 PRIMARY_SCAN_ACTIVE_STATES = {"queued", "checking", "runtime_checking"}
 PRIMARY_SCAN_PAUSED_STATES = {"paused"}
@@ -1093,6 +1094,7 @@ async def _run_job_impl(job: dict) -> None:
                 )
                 job["results"][idx] = result
                 job["completed"] += 1
+                job["completed_targets"] = job["completed"]
                 if result.get("available"):
                     job["available"] += 1
                 if result.get("generic_ok") is True:
@@ -1733,6 +1735,10 @@ async def create_job(request: Request) -> dict:
         "created_at": now(), "started_at": None, "finished_at": None,
         "state": "queued", "cancel_requested": False, "pause_requested": False, "interrupted_stage": None, "resume_available": False,
         "targets": targets, "total": len(targets), "completed": 0, "available": 0, "final_available": 0,
+        "candidate_pool_total": len(targets),
+        "loaded_targets": len(targets),
+        "filtered_targets": 0,
+        "completed_targets": 0,
         "current_batch": 0, "completed_batches": 0,
         "generic_available": 0, "same_exit": 0, "runtime_total": 0, "runtime_completed": 0, "runtime_available": 0,
         "speed_total": 0, "speed_completed": 0, "purity_total": 0, "purity_completed": 0,

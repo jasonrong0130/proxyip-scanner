@@ -12,12 +12,12 @@ def calculate_quality_score(row: dict) -> int:
 
     Higher means a better candidate. Missing fields do not fail scoring.
     """
-    score = 50
+    score = 40
 
     if row.get("final_available") is True:
-        score += 25
+        score += 15
     elif row.get("available") is True:
-        score += 10
+        score += 8
     elif row.get("last_checked_at"):
         score -= 15
 
@@ -54,12 +54,14 @@ def calculate_quality_score(row: dict) -> int:
 
     latency = row.get("tcp_ms")
     if isinstance(latency, (int, float)):
-        if latency < 80:
+        if latency < 50:
             score += 10
-        elif latency < 160:
+        elif latency < 100:
+            score += 8
+        elif latency < 200:
             score += 5
         elif latency > 500:
-            score -= 12
+            score -= 10
         elif latency > 300:
             score -= 7
 
@@ -69,7 +71,9 @@ def calculate_quality_score(row: dict) -> int:
     if isinstance(speed, dict):
         mbps = speed.get("avg_mbps")
         if isinstance(mbps, (int, float)):
-            if mbps >= 100:
+            if mbps >= 200:
+                score += 15
+            elif mbps >= 100:
                 score += 10
             elif mbps >= 30:
                 score += 5

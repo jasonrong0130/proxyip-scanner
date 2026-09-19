@@ -1056,7 +1056,7 @@ async def get_pool_targets(region: str = "HK") -> List[str]:
 async def get_scan_targets(region: str = "HK", limit: Optional[int] = None, force: bool = False) -> List[str]:
     """Return only new/due candidates, prioritising never-scanned endpoints."""
     region = str(region or "HK").upper()
-    cap = max(1, min(int(limit or SCAN_BATCH_LIMIT), SCAN_BATCH_LIMIT))
+    cap = None if force else max(1, min(int(limit or SCAN_BATCH_LIMIT), SCAN_BATCH_LIMIT))
     ts = _now()
     selected: List[tuple] = []
 
@@ -1073,7 +1073,7 @@ async def get_scan_targets(region: str = "HK", limit: Optional[int] = None, forc
                 -len(row.get("sources") or []),
                 target,
             ))
-        if len(selected) > cap * 2:
+        if cap is not None and len(selected) > cap * 2:
             selected.sort()
             del selected[cap:]
 
@@ -1099,7 +1099,8 @@ async def get_scan_targets(region: str = "HK", limit: Optional[int] = None, forc
         _release_memory()
 
     selected.sort()
-    return _dedupe([item[5] for item in selected])[:cap]
+    result = _dedupe([item[5] for item in selected])
+    return result if cap is None else result[:cap]
 
 
 async def _build_region_data(region: str, catalog: dict) -> dict:
@@ -1293,8 +1294,17 @@ async def record_scan_results(region: str, results: List[dict], count_check: boo
                     if asn:
                         _record_asn_feedback(asn_quality, asn, final_ok, score)
                 if final_ok:
-                    item = dict(result)
-                    item["quality_score"] = int(candidate.get("quality_score") or 0)
+                    item = dict(candidate)
+                    for result_key, result_value in result.items():
+                        if result_value is not None:
+                            item[result_key] = result_value
+                    for preserve_key in (
+                        "sources", "success_count", "failure_count", "avg_mbps",
+                        "purity", "tcp_ms", "tls_ms", "quality_score",
+                    ):
+                        if candidate.get(preserve_key) is not None:
+                            item[preserve_key] = candidate.get(preserve_key)
+                    item["quality_score"] = int(candidate.get("quality_score") or item.get("quality_score") or 0)
                     item["last_verified_at"] = ts
                     verified_map[key] = item
                 else:
