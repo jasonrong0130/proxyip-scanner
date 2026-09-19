@@ -651,6 +651,70 @@ def _verified_data() -> dict:
     return data
 
 
+def _source_quality_data() -> dict:
+    data = _load_json("source_quality.json", {"updated_at": None, "sources": {}})
+    if not isinstance(data, dict):
+        data = {"updated_at": None, "sources": {}}
+    data.setdefault("sources", {})
+    return data
+
+
+def _asn_quality_data() -> dict:
+    data = _load_json("asn_quality.json", {"updated_at": None, "asns": {}})
+    if not isinstance(data, dict):
+        data = {"updated_at": None, "asns": {}}
+    data.setdefault("asns", {})
+    return data
+
+
+def _row_asn(row: dict) -> str:
+    value = row.get("entry_asn") or row.get("asn")
+    if not value and isinstance(row.get("entry_geo"), dict):
+        value = row["entry_geo"].get("asn")
+    digits = re.sub(r"\D", "", str(value or ""))
+    return digits if digits and 1 <= int(digits) <= 4294967295 else ""
+
+
+def _source_quality_sort_key(row: dict, quality: Optional[dict] = None) -> tuple:
+    item = (quality or {}).get(str(row.get("name") or ""), {})
+    return (
+        float(item.get("success_rate") or 0),
+        float(item.get("avg_score") or 0),
+        int(item.get("verified") or 0),
+        int(item.get("contributed") or 0),
+    )
+
+
+def _asn_quality_sort_key(asn: str, quality: Optional[dict] = None) -> tuple:
+    item = (quality or {}).get(str(asn), {})
+    return (
+        float(item.get("success_rate") or 0),
+        float(item.get("avg_score") or 0),
+        int(item.get("sample_count") or 0),
+    )
+
+
+def _record_source_feedback(source_quality: dict, name: str, final_ok: bool, score: int) -> None:
+    item = source_quality.setdefault("sources", {}).setdefault(name, {
+        "name": name, "contributed": 0, "verified": 0, "success_rate": 0.0, "avg_score": 0.0,
+    })
+    previous = int(item.get("contributed") or 0)
+    item["contributed"] = previous + 1
+    item["verified"] = int(item.get("verified") or 0) + int(final_ok)
+    item["avg_score"] = round(((float(item.get("avg_score") or 0) * previous) + score) / item["contributed"], 2)
+    item["success_rate"] = round(item["verified"] / item["contributed"], 4)
+
+
+def _record_asn_feedback(asn_quality: dict, asn: str, final_ok: bool, score: int) -> None:
+    item = asn_quality.setdefault("asns", {}).setdefault(asn, {
+        "asn": asn, "prefix_count": 0, "sample_count": 0, "success_rate": 0.0, "avg_score": 0.0,
+    })
+    previous = int(item.get("sample_count") or 0)
+    item["sample_count"] = previous + 1
+    item["avg_score"] = round(((float(item.get("avg_score") or 0) * previous) + score) / item["sample_count"], 2)
+    item["success_rate"] = round((float(item.get("success_rate") or 0) * previous + int(final_ok)) / item["sample_count"], 4)
+
+
 def _candidate_due(row: dict, ts: Optional[float] = None) -> bool:
     ts = float(ts or _now())
     checked_at = float(row.get("last_checked_at") or 0)
@@ -801,6 +865,8 @@ async def _region_sources(region: str) -> List[dict]:
         changed = True
     if changed:
         _save_custom_sources(custom_rows)
+    quality = _source_quality_data().get("sources") or {}
+    results.sort(key=lambda row: _source_quality_sort_key(row, quality), reverse=True)
     return results
 
 
@@ -938,11 +1004,19 @@ async def _discover_asn_candidates(region: str) -> List[str]:
             break
     if not asns:
         return []
+    asn_quality = _asn_quality_data().get("asns") or {}
+    asns.sort(key=lambda value: _asn_quality_sort_key(value, asn_quality), reverse=True)
     prefix_rows = await asyncio.gather(*(_fetch_ripe_asn_prefixes(asn) for asn in asns), return_exceptions=True)
     prefixes: List[str] = []
-    for row in prefix_rows:
+    quality_data = _asn_quality_data()
+    for asn, row in zip(asns, prefix_rows):
         if not isinstance(row, Exception):
             prefixes.extend(row)
+            quality_data.setdefault("asns", {}).setdefault(asn, {
+                "asn": asn, "prefix_count": 0, "sample_count": 0, "success_rate": 0.0, "avg_score": 0.0,
+            })["prefix_count"] = len(row)
+    quality_data["updated_at"] = _now()
+    _save_json("asn_quality.json", quality_data)
     return _sample_prefix_targets(_dedupe(prefixes), ASN_DISCOVERY_MAX_CANDIDATES)
 
 
@@ -1025,7 +1099,7 @@ async def get_scan_targets(region: str = "HK", limit: Optional[int] = None, forc
         _release_memory()
 
     selected.sort()
-    return _dedupe([item[3] for item in selected])[:cap]
+    return _dedupe([item[5] for item in selected])[:cap]
 
 
 async def _build_region_data(region: str, catalog: dict) -> dict:
@@ -1148,6 +1222,8 @@ async def record_scan_results(region: str, results: List[dict], count_check: boo
     async with _STATE_LOCK:
         verified = _verified_data()
         meta = _pool_meta()
+        source_quality = _source_quality_data() if count_check else None
+        asn_quality = _asn_quality_data() if count_check else None
         if region == "ALL":
             region_codes = list((meta.get("region_counts") or {}).keys()) or list(REGIONS)
         else:
@@ -1206,6 +1282,16 @@ async def record_scan_results(region: str, results: List[dict], count_check: boo
                 if result.get("available") is True:
                     base_available += 1
                 apply_quality_score(candidate)
+                if count_check:
+                    source_names = list(candidate.get("sources") or [])
+                    if not source_names and candidate.get("source"):
+                        source_names = [str(candidate.get("source"))]
+                    score = int(candidate.get("quality_score") or 0)
+                    for source_name in source_names:
+                        _record_source_feedback(source_quality, str(source_name), final_ok, score)
+                    asn = _row_asn(result) or _row_asn(candidate)
+                    if asn:
+                        _record_asn_feedback(asn_quality, asn, final_ok, score)
                 if final_ok:
                     item = dict(result)
                     item["quality_score"] = int(candidate.get("quality_score") or 0)
@@ -1252,6 +1338,11 @@ async def record_scan_results(region: str, results: List[dict], count_check: boo
 
         verified["updated_at"] = ts
         _save_json("candidate_verified.json", verified)
+        if count_check:
+            source_quality["updated_at"] = ts
+            asn_quality["updated_at"] = ts
+            _save_json("source_quality.json", source_quality)
+            _save_json("asn_quality.json", asn_quality)
         verified_total = sum(
             int((row or {}).get("final_available") or 0)
             for row in (verified.get("regions") or {}).values()
@@ -1501,6 +1592,31 @@ async def api_pool(request: Request, region: str = "HK", preview_limit: int = 30
         "refresh_interval": REFRESH_INTERVAL,
         "recheck_interval": RECHECK_INTERVAL,
     }
+
+
+@router.get("/api/candidate-pool/verified")
+async def api_verified_pool(request: Request) -> dict:
+    _auth(request)
+    data = _verified_data()
+    rows = []
+    total = 0
+    for region, item in sorted((data.get("regions") or {}).items()):
+        results = list(item.get("results") or []) if isinstance(item, dict) else []
+        count = int(item.get("final_available") or len(results)) if isinstance(item, dict) else len(results)
+        total += count
+        rows.append({
+            "region": region,
+            "count": count,
+            "updated_at": item.get("updated_at") if isinstance(item, dict) else None,
+            "top_nodes": [_public_candidate(row) for row in results[:5]],
+        })
+    return {"updated_at": data.get("updated_at"), "total": total, "regions": rows}
+
+
+@router.get("/api/candidate-pool/quality")
+async def api_pool_quality(request: Request) -> dict:
+    _auth(request)
+    return {"source_quality": _source_quality_data(), "asn_quality": _asn_quality_data()}
 
 
 @router.post("/api/candidate-pool/refresh")

@@ -61,12 +61,13 @@ LOGIN_MAX_FAILURES = int(os.environ.get("LOGIN_MAX_FAILURES", "5"))
 PING0_API_KEY = os.environ.get("PING0_API_KEY", "").strip()
 DEFAULT_PURITY_CONCURRENCY = max(1, min(10, int(os.environ.get("PURITY_CONCURRENCY", "4"))))
 CHECKPOINT_BATCH_SIZE = max(20, min(1000, int(os.environ.get("SCAN_CHECKPOINT_BATCH", "100"))))
+FULL_SCAN_BATCH_SIZE = 1000
 LARGE_JOB_THRESHOLD = max(1000, int(os.environ.get("LARGE_JOB_THRESHOLD", "20000")))
 MAX_RESUME_ITEMS = max(1000, int(os.environ.get("MAX_RESUME_ITEMS", "500000")))
 JOB_RETENTION_DAYS = max(1, min(365, int(os.environ.get("JOB_RETENTION_DAYS", "7"))))
 JOB_RETENTION_SECONDS = JOB_RETENTION_DAYS * 86400
 JOB_META_FIELDS = (
-    "id", "state", "interrupted_stage", "resume_available", "created_at", "started_at", "finished_at", "candidate_region",
+    "id", "state", "interrupted_stage", "resume_available", "created_at", "started_at", "finished_at", "candidate_region", "scan_mode", "batch_size", "batch_count", "current_batch", "completed_batches",
     "total", "completed", "available", "final_available", "generic_available", "same_exit",
     "runtime_total", "runtime_completed", "runtime_available",
     "speed_total", "speed_completed", "purity_total", "purity_completed",
@@ -1051,59 +1052,89 @@ async def _run_job_impl(job: dict) -> None:
         i for i, row in enumerate(job.get("results", []))
         if row.get("state") != "checked"
     ]
-    next_index = 0
-    index_lock = asyncio.Lock()
+    batch_size = max(1, int(job.get("batch_size") or len(targets) or 1))
+    batch_count = max(1, int(job.get("batch_count") or ((len(targets) + batch_size - 1) // batch_size)))
+    if job.get("scan_mode") == "full":
+        batches = []
+        by_batch = {}
+        for idx in pending_indices:
+            batch_no = min(batch_count, idx // batch_size + 1)
+            by_batch.setdefault(batch_no, []).append(idx)
+        batches = sorted(by_batch.items())
+    else:
+        batches = [(1, pending_indices)]
+        batch_count = 1
+    job["batch_count"] = batch_count
 
-    async def worker_loop() -> None:
-        nonlocal next_index
-        while not job.get("cancel_requested") and not job.get("pause_requested"):
-            async with index_lock:
-                if next_index >= len(pending_indices):
-                    return
-                idx = pending_indices[next_index]
-                next_index += 1
-            raw = targets[idx]
-            job["results"][idx]["state"] = "checking"
-            result = await test_one(
-                raw,
-                settings["probe_sni"],
-                settings["probe_path"],
-                settings["expect_cloudflare"],
-                settings["generic_sni"],
-                settings["timeout"],
-            )
-            job["results"][idx] = result
-            job["completed"] += 1
-            if result.get("available"):
-                job["available"] += 1
-            if result.get("generic_ok") is True:
-                job["generic_available"] += 1
-            if result.get("exit_match") == "same":
-                job["same_exit"] += 1
-            checkpoint_result(job, idx)
-            if is_large_job(job) and result.get("available") is False:
-                job["results"][idx] = compact_failed_row(result)
+    for batch_no, batch_indices in batches:
+        if not batch_indices:
+            continue
+        job["current_batch"] = batch_no
+        next_index = 0
+        index_lock = asyncio.Lock()
 
-    workers = [asyncio.create_task(worker_loop()) for _ in range(min(concurrency, len(targets)))]
-    if workers:
-        await asyncio.gather(*workers, return_exceptions=True)
+        async def worker_loop() -> None:
+            nonlocal next_index
+            while not job.get("cancel_requested") and not job.get("pause_requested"):
+                async with index_lock:
+                    if next_index >= len(batch_indices):
+                        return
+                    idx = batch_indices[next_index]
+                    next_index += 1
+                raw = targets[idx]
+                job["results"][idx]["state"] = "checking"
+                result = await test_one(
+                    raw,
+                    settings["probe_sni"],
+                    settings["probe_path"],
+                    settings["expect_cloudflare"],
+                    settings["generic_sni"],
+                    settings["timeout"],
+                )
+                job["results"][idx] = result
+                job["completed"] += 1
+                if result.get("available"):
+                    job["available"] += 1
+                if result.get("generic_ok") is True:
+                    job["generic_available"] += 1
+                if result.get("exit_match") == "same":
+                    job["same_exit"] += 1
+                checkpoint_result(job, idx)
+                if is_large_job(job) and result.get("available") is False:
+                    job["results"][idx] = compact_failed_row(result)
 
-    if job.get("cancel_requested"):
-        for row in job["results"]:
-            if row.get("state") in {"pending", "checking"}:
-                row["state"] = "cancelled"
-        job["state"] = "cancelled"
-        job["finished_at"] = now()
+        workers = [asyncio.create_task(worker_loop()) for _ in range(min(concurrency, len(batch_indices)))]
+        if workers:
+            worker_results = await asyncio.gather(*workers, return_exceptions=True)
+            batch_errors = [error for error in worker_results if isinstance(error, Exception)]
+            if batch_errors:
+                raise batch_errors[0]
+
+        if job.get("cancel_requested"):
+            for row in job["results"]:
+                if row.get("state") in {"pending", "checking"}:
+                    row["state"] = "cancelled"
+            job["state"] = "cancelled"
+            job["finished_at"] = now()
+            compact_job_checkpoint(job)
+            release_job_memory(job)
+            return
+
+        if job.get("pause_requested"):
+            for row in job["results"]:
+                if row.get("state") == "checking":
+                    row["state"] = "pending"
+            _persist_primary_pause(job, "checking")
+            return
+
+        job["completed_batches"] = max(int(job.get("completed_batches") or 0), batch_no)
+        job["current_batch"] = min(batch_no + 1, batch_count)
+        # A batch boundary is a durable resume point, including the progress fields.
         compact_job_checkpoint(job)
-        release_job_memory(job)
-        return
 
-    if job.get("pause_requested"):
-        for row in job["results"]:
-            if row.get("state") == "checking":
-                row["state"] = "pending"
-        _persist_primary_pause(job, "checking")
-        return
+    if job.get("scan_mode") == "full":
+        job["completed_batches"] = batch_count
+        job["current_batch"] = batch_count
 
     runtime_cfg = settings.get("edt_runtime") or {}
     if runtime_cfg.get("enabled"):
@@ -1635,7 +1666,7 @@ async def list_jobs(request: Request) -> dict:
             if stub:
                 JOBS[job_id] = stub
 
-        rows.append({k: stub.get(k) for k in ["id", "state", "interrupted_stage", "resume_available", "created_at", "started_at", "finished_at", "total", "completed", "available", "final_available", "runtime_total", "runtime_completed", "runtime_available", "speed_total", "speed_completed", "purity_total", "purity_completed"]})
+        rows.append({k: stub.get(k) for k in ["id", "state", "interrupted_stage", "resume_available", "created_at", "started_at", "finished_at", "candidate_region", "scan_mode", "batch_size", "batch_count", "current_batch", "completed_batches", "total", "completed", "available", "final_available", "runtime_total", "runtime_completed", "runtime_available", "speed_total", "speed_completed", "purity_total", "purity_completed"]})
     rows.sort(key=lambda x: x.get("created_at", 0) or 0, reverse=True)
     return {"jobs": rows[:100]}
 
@@ -1691,12 +1722,18 @@ async def create_job(request: Request) -> dict:
         raise HTTPException(status_code=409, detail=f"当前已有扫描任务 {active_primary}，请先完成、停止或恢复该任务")
 
     job_id = uuid.uuid4().hex[:12]
+    batch_size = clamp_int(body.get("batch_size"), FULL_SCAN_BATCH_SIZE, 1, 10000) if force_scan and candidate_region else len(targets)
+    batch_count = max(1, (len(targets) + batch_size - 1) // batch_size)
     job = {
         "id": job_id,
         "candidate_region": candidate_region or None,
+        "scan_mode": "full" if force_scan and candidate_region else "incremental" if candidate_region else "manual",
+        "batch_size": batch_size,
+        "batch_count": batch_count,
         "created_at": now(), "started_at": None, "finished_at": None,
         "state": "queued", "cancel_requested": False, "pause_requested": False, "interrupted_stage": None, "resume_available": False,
         "targets": targets, "total": len(targets), "completed": 0, "available": 0, "final_available": 0,
+        "current_batch": 0, "completed_batches": 0,
         "generic_available": 0, "same_exit": 0, "runtime_total": 0, "runtime_completed": 0, "runtime_available": 0,
         "speed_total": 0, "speed_completed": 0, "purity_total": 0, "purity_completed": 0,
         "settings": {
@@ -1722,7 +1759,7 @@ async def create_job(request: Request) -> dict:
     JOBS[job_id] = job
     persist_job(job)
     job["_task"] = asyncio.create_task(run_job(job))
-    return {"id": job_id, "state": job["state"], "total": len(targets), "scan_ports": scan_ports}
+    return {"id": job_id, "state": job["state"], "total": len(targets), "scan_mode": job["scan_mode"], "current_batch": job["current_batch"], "batch_count": job["batch_count"], "completed_batches": job["completed_batches"], "scan_ports": scan_ports}
 
 
 
@@ -1880,6 +1917,9 @@ async def pause_primary_scan(job_id: str, request: Request) -> dict:
     return {
         "ok": True, "id": job_id, "state": paused.get("state"),
         "completed": paused.get("completed", 0),
+        "current_batch": paused.get("current_batch", 0),
+        "batch_count": paused.get("batch_count", 1),
+        "completed_batches": paused.get("completed_batches", 0),
         "runtime_completed": paused.get("runtime_completed", 0),
     }
 
@@ -1914,7 +1954,7 @@ async def resume_interrupted_scan(job_id: str, request: Request) -> dict:
     job["resume_available"] = False
     persist_job(job)
     job["_task"] = asyncio.create_task(run_job(job))
-    return {"ok": True, "id": job_id, "remaining": pending, "completed": job.get("completed", 0)}
+    return {"ok": True, "id": job_id, "remaining": pending, "completed": job.get("completed", 0), "current_batch": job.get("current_batch", 0), "batch_count": job.get("batch_count", 1), "completed_batches": job.get("completed_batches", 0)}
 
 
 @app.post("/api/jobs/{job_id}/speed")
@@ -2484,6 +2524,32 @@ async def delete_job(job_id: str, request: Request) -> dict:
     if result.get("reason") == "active":
         raise HTTPException(status_code=409, detail="stop the job before deleting it")
     return {"ok": True, "id": job_id, **result}
+
+
+@app.get("/api/candidate-pool/verified/export.txt")
+async def export_verified_txt(request: Request) -> Response:
+    require_web_session(request)
+    data = candidate_pool._verified_data()
+    rows = []
+    for item in (data.get("regions") or {}).values():
+        for row in item.get("results") or []:
+            target = row.get("target") or row.get("candidate")
+            if target:
+                rows.append(str(target))
+    return Response("\n".join(dict.fromkeys(rows)) + ("\n" if rows else ""), media_type="text/plain; charset=utf-8", headers={"Content-Disposition": 'attachment; filename="verified-proxyip.txt"'})
+
+
+@app.get("/api/candidate-pool/verified/export.csv")
+async def export_verified_csv(request: Request) -> Response:
+    require_web_session(request)
+    data = candidate_pool._verified_data()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["IP", "地区", "更新时间"])
+    for region, item in (data.get("regions") or {}).items():
+        for row in item.get("results") or []:
+            writer.writerow([row.get("target") or row.get("candidate") or "", region, item.get("updated_at")])
+    return Response("\ufeff" + output.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": 'attachment; filename="verified-proxyip.csv"'})
 
 
 @app.get("/api/jobs/{job_id}/export.csv")
