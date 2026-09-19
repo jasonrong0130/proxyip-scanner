@@ -1627,13 +1627,9 @@ async def api_pool(request: Request, region: str = "HK", preview_limit: int = 30
         del data
         _release_memory()
 
-    verified_row = verified.get("regions", {}).get(region) or {"final_available": 0, "results": [], "updated_at": None}
-    verified_view = dict(verified_row)
-    verified_view["results"] = [_public_candidate(row) for row in list(verified_row.get("results") or [])[: min(preview_limit, 100)]]
     return {
         "region": region,
         "pool": pool_view,
-        "verified": verified_view,
         "meta": _pool_meta(),
         "refresh_interval": REFRESH_INTERVAL,
         "recheck_interval": RECHECK_INTERVAL,
