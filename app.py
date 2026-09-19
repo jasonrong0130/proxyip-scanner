@@ -1649,10 +1649,11 @@ async def create_job(request: Request) -> dict:
     try:
         scan_ports = normalize_scan_ports(body.get("scan_ports"))
         candidate_region = str(body.get("candidate_region") or "").strip().upper()
+        force_scan = bool(body.get("force_scan", False))
         if candidate_region:
-            targets = await candidate_pool.get_scan_targets(candidate_region)
+            targets = await candidate_pool.get_scan_targets(candidate_region, force=force_scan)
             if not targets:
-                raise ValueError("候选池当前没有新增或到期复检节点")
+                raise ValueError("候选池当前没有可扫描节点")
         else:
             targets = normalized_targets(body.get("targets"), scan_ports)
         probe_sni = validate_sni(body.get("probe_sni") or DEFAULT_PROBE_SNI)

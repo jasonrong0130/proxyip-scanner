@@ -141,7 +141,7 @@ async function startScan(){
  try{
   const speedMode=$('speedEnabled').value,sp=speedProfile(speedMode);
   const body={probe_sni:sni,probe_path:$('probePath').value||'/cdn-cgi/trace',generic_sni:'',expect_cloudflare:$('expectCf').value==='1',check_concurrency:Number($('checkConcurrency').value),scan_ports:scanPorts(),timeout:Number($('timeout').value||7),edt_runtime:{enabled:$('edtEnabled').value==='1'},speed:{enabled:speedMode!=='0',mode:sp.mode,bytes:sp.bytes,concurrency:sp.concurrency,repeats:sp.repeats}};
-  if(poolLoadedRegion)body.candidate_region=poolLoadedRegion;else body.targets=targets;
+  if(poolLoadedRegion){body.candidate_region=poolLoadedRegion;body.force_scan=true;}else body.targets=targets;
   const d=await api('/api/jobs',{method:'POST',body:JSON.stringify(body)});jobId=d.id;clearInterval(timer);timer=null;await poll();if(jobIsActive(current?.state))timer=setInterval(poll,1500);
  }catch(e){alert(e.message);$('startBtn').disabled=false;}
 }
