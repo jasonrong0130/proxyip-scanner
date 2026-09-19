@@ -27,6 +27,16 @@ def calculate_quality_score(row: dict) -> int:
     except Exception:
         pass
 
+    # Reward nodes with enough verification history. A single successful probe
+    # should not outweigh a long record of unstable behavior.
+    checks = row.get("check_count")
+    successes = row.get("success_count")
+    if isinstance(checks, (int, float)) and isinstance(successes, (int, float)) and checks > 0:
+        success_rate = max(0.0, min(1.0, float(successes) / float(checks)))
+        score += (success_rate - 0.5) * 20
+        if checks >= 20:
+            score += 3
+
     purity = row.get("purity") or {}
     if not purity and any(key in row for key in ("purity_score", "risk_score", "is_residential", "is_idc")):
         purity = {key: row.get(key) for key in ("purity_score", "risk_score", "is_residential", "is_idc")}
@@ -92,5 +102,6 @@ def apply_quality_score(row: dict) -> dict:
 def cleanup_sort_key(row: dict) -> tuple:
     return (
         int(row.get("quality_score") or 0),
+        int(row.get("success_count") or 0),
         int(len(row.get("sources") or [])),
     )

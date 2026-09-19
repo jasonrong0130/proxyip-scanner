@@ -158,6 +158,29 @@ class CandidatePoolIncrementalTests(unittest.TestCase):
         )
         self.assertGreater(good, bad)
 
+    def test_quality_score_rewards_stable_history(self) -> None:
+        stable = calculate_quality_score(
+            {
+                "final_available": True,
+                "check_count": 50,
+                "success_count": 48,
+                "tcp_ms": 60,
+                "avg_mbps": 80,
+                "sources": ["a", "b", "c"],
+            }
+        )
+        unstable = calculate_quality_score(
+            {
+                "final_available": True,
+                "check_count": 20,
+                "success_count": 5,
+                "tcp_ms": 60,
+                "avg_mbps": 80,
+                "sources": ["a", "b", "c"],
+            }
+        )
+        self.assertGreater(stable, unstable)
+
 
 if __name__ == "__main__":
     unittest.main()

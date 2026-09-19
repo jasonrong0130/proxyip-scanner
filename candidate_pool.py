@@ -44,6 +44,11 @@ POOL_MAX_PER_REGION = max(1000, min(200000, int(os.environ.get("CANDIDATE_POOL_M
 VERIFIED_MAX_PER_REGION = max(100, min(50000, int(os.environ.get("CANDIDATE_VERIFIED_MAX_PER_REGION", "5000"))))
 FAILED_RETRY_BASE = max(6 * 3600, int(os.environ.get("CANDIDATE_FAILED_RETRY_BASE", str(24 * 3600))))
 STALE_RETENTION = max(24 * 3600, int(os.environ.get("CANDIDATE_STALE_RETENTION", str(14 * 24 * 3600))))
+# Quality lifecycle cleanup. Failed low-value candidates should not consume the
+# long-running pool capacity forever, while verified candidates are protected.
+MIN_KEEP_SCORE = max(0, min(100, int(os.environ.get("CANDIDATE_MIN_KEEP_SCORE", "20"))))
+MIN_KEEP_CHECKS = max(1, int(os.environ.get("CANDIDATE_MIN_KEEP_CHECKS", "3")))
+MAX_CONSECUTIVE_FAILURES = max(1, int(os.environ.get("CANDIDATE_MAX_CONSECUTIVE_FAILURES", "8")))
 SCAN_BATCH_LIMIT = max(100, min(100000, int(os.environ.get("CANDIDATE_SCAN_BATCH_LIMIT", "30000"))))
 ASN_DISCOVERY_ENABLED = str(os.environ.get("CANDIDATE_ASN_DISCOVERY", "1")).strip().lower() in {"1", "true", "yes", "on"}
 ASN_DISCOVERY_MAX_ASNS = max(1, min(32, int(os.environ.get("CANDIDATE_ASN_MAX", "8"))))
@@ -674,11 +679,26 @@ def _prune_pool_rows(rows: List[dict]) -> List[dict]:
     for row in rows:
         if not isinstance(row, dict) or not row.get("target"):
             continue
+
+        apply_quality_score(row)
+        score = int(row.get("quality_score") or 0)
+        failures = int(row.get("consecutive_failures") or 0)
+        checks = int(row.get("check_count") or 0)
+
         # Keep known-good endpoints even if their upstream source temporarily disappears.
         if row.get("final_available") is not True and now_ts - float(row.get("last_seen_at") or now_ts) > STALE_RETENTION:
             continue
-        apply_quality_score(row)
+
+        # Remove candidates that have enough evidence to be classified as bad.
+        # New candidates are allowed to receive initial probes before cleanup.
+        if row.get("final_available") is not True:
+            if checks >= MIN_KEEP_CHECKS and score < MIN_KEEP_SCORE:
+                continue
+            if failures >= MAX_CONSECUTIVE_FAILURES:
+                continue
+
         retained.append(row)
+
     retained.sort(key=_candidate_keep_key, reverse=True)
     return retained[:POOL_MAX_PER_REGION]
 
