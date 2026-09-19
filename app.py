@@ -2551,10 +2551,27 @@ async def export_verified_csv(request: Request) -> Response:
     data = candidate_pool._verified_data()
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["IP", "地区", "更新时间"])
+    writer.writerow(["IP", "地区", "质量分", "速度(Mbps)", "延迟(ms)", "纯净度", "成功率", "更新时间"])
     for region, item in (data.get("regions") or {}).items():
         for row in item.get("results") or []:
-            writer.writerow([row.get("target") or row.get("candidate") or "", region, item.get("updated_at")])
+            updated = row.get("last_verified_at") or item.get("updated_at")
+            try:
+                updated = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(updated)))
+            except Exception:
+                updated = "-"
+            checks = int(row.get("check_count") or 0)
+            success = int(row.get("success_count") or 0)
+            success_rate = f"{round(success / checks * 100, 1)}%" if checks else "-"
+            writer.writerow([
+                row.get("target") or row.get("candidate") or "",
+                region,
+                row.get("quality_score") or "-",
+                row.get("avg_mbps") or "-",
+                row.get("tcp_ms") or "-",
+                row.get("purity") or "-",
+                success_rate,
+                updated,
+            ])
     return Response("\ufeff" + output.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": 'attachment; filename="verified-proxyip.csv"'})
 
 
