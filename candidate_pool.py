@@ -667,6 +667,8 @@ def _candidate_keep_key(row: dict) -> tuple:
     return (
         1 if row.get("final_available") is True else 0,
         int(row.get("quality_score") or 0),
+        int(row.get("source_weight") or 0),
+        int(row.get("success_count") or 0),
         float(row.get("last_success_at") or 0),
         float(row.get("last_seen_at") or 0),
         len(row.get("sources") or []),
@@ -717,9 +719,19 @@ async def _run_source(name: str, region_hint: Optional[str], loader: Callable[[]
     started = _now()
     try:
         items = _dedupe(await loader())
-        return {"name": name, "region_hint": region_hint, "items": items, "count": len(items), "status": "ok", "ms": round((_now() - started) * 1000, 1)}
+        # Internal source trust weight. It only affects backend ordering and
+        # never changes public API output.
+        source_weight = 50
+        lowered = str(name).lower()
+        if "高速" in name or "已验证" in name or "residential" in lowered:
+            source_weight += 25
+        if "asn" in lowered:
+            source_weight += 10
+        if "公共" in name or "freesub" in lowered or "vpngate" in lowered:
+            source_weight -= 10
+        return {"name": name, "region_hint": region_hint, "items": items, "count": len(items), "source_weight": source_weight, "status": "ok", "ms": round((_now() - started) * 1000, 1)}
     except Exception as exc:
-        return {"name": name, "region_hint": region_hint, "items": [], "count": 0, "status": str(exc)[:180], "ms": round((_now() - started) * 1000, 1)}
+        return {"name": name, "region_hint": region_hint, "items": [], "count": 0, "source_weight": 0, "status": str(exc)[:180], "ms": round((_now() - started) * 1000, 1)}
 
 
 async def _load_custom_source(row: dict) -> List[str]:
@@ -981,6 +993,8 @@ async def get_scan_targets(region: str = "HK", limit: Optional[int] = None, forc
                 continue
             selected.append((
                 0 if not row.get("last_checked_at") else 1,
+                -int(row.get("quality_score") or 0),
+                -int(row.get("source_weight") or 0),
                 float(row.get("last_checked_at") or 0),
                 -len(row.get("sources") or []),
                 target,
@@ -1036,7 +1050,7 @@ async def _build_region_data(region: str, catalog: dict) -> dict:
             if key not in seen:
                 seen.add(key)
                 contributed += 1
-        stats.append({k: source.get(k) for k in ("name", "count", "status", "ms")} | {"contributed": contributed})
+        stats.append({k: source.get(k) for k in ("name", "count", "status", "ms", "source_weight")} | {"contributed": contributed})
         source["items"] = []
 
     ts = _now()
@@ -1216,6 +1230,8 @@ async def record_scan_results(region: str, results: List[dict], count_check: boo
             verified_rows.sort(
                 key=lambda row: (
                     int(row.get("quality_score") or 0),
+                    int(row.get("success_count") or 0),
+                    len(row.get("sources") or []),
                     -float(row.get("tcp_ms") if isinstance(row.get("tcp_ms"), (int, float)) else 1e9),
                     float(row.get("last_verified_at") or 0),
                 ),

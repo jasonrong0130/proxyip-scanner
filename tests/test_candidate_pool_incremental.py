@@ -181,6 +181,23 @@ class CandidatePoolIncrementalTests(unittest.TestCase):
         )
         self.assertGreater(stable, unstable)
 
+    def test_candidate_keep_prefers_trusted_source(self) -> None:
+        trusted = candidate_pool._candidate_keep_key({
+            "final_available": True,
+            "quality_score": 80,
+            "source_weight": 80,
+            "success_count": 20,
+            "sources": ["verified"],
+        })
+        normal = candidate_pool._candidate_keep_key({
+            "final_available": True,
+            "quality_score": 80,
+            "source_weight": 40,
+            "success_count": 20,
+            "sources": ["public"],
+        })
+        self.assertGreater(trusted, normal)
+
 
 if __name__ == "__main__":
     unittest.main()
