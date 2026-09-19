@@ -2546,7 +2546,7 @@ async def export_verified_csv(request: Request) -> Response:
     data = candidate_pool._verified_pool_payload()
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["节点", "地区", "质量分", "速度(Mbps)", "延迟(ms)", "纯净度", "成功率", "更新时间"])
+    writer.writerow(["节点", "出口IP", "地区", "纯净度(IPPure系数)", "速度(Mbps)", "延迟(ms)", "纯净类型", "成功率", "更新时间"])
     for row in data["results"]:
         try:
             updated = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(row.get("last_verified_at"))))
@@ -2556,11 +2556,12 @@ async def export_verified_csv(request: Request) -> Response:
         rate = round(row["success_count"] / checks * 100, 1) if checks else None
         writer.writerow([
             row["target"],
+            row["exit_ip"] or "-",
             row["region"],
-            row["quality_score"],
+            row["purity_score"] if row["purity_score"] is not None else "未检测",
             row["avg_mbps"] if row["avg_mbps"] is not None else "-",
             row["tcp_ms"] if row["tcp_ms"] is not None else "-",
-            row["purity"],
+            row["purity_type"] or "-",
             f"{rate:g}%" if rate is not None else "-",
             updated,
         ])

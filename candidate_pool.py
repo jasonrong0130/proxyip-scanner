@@ -20,7 +20,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from edt_runtime import check_edt_runtime
 from geoip import enrich_result
-from quality_score import apply_quality_score
+from quality_score import apply_quality_score, calculate_quality_score, extract_purity_score
 
 router = APIRouter()
 
@@ -835,10 +835,15 @@ def _verified_pool_payload(data: Optional[dict] = None) -> dict:
                     purity = network_type or "-"
             elif not purity:
                 purity = "IDC" if row.get("is_idc") is True else ("Residential" if row.get("is_residential") is True else "-")
+            purity_data = row.get("purity") if isinstance(row.get("purity"), dict) else {}
             results.append({
                 "target": row.get("target") or row.get("candidate") or "",
+                "exit_ip": row.get("exit_ip") or purity_data.get("checked_ip"),
                 "region": region,
-                "quality_score": int(row.get("quality_score") or 0),
+                "quality_score": calculate_quality_score(row),
+                "purity_score": extract_purity_score(row),
+                "purity_provider": purity_data.get("provider"),
+                "purity_type": purity_data.get("network_type"),
                 "avg_mbps": row.get("avg_mbps"),
                 "tcp_ms": row.get("tcp_ms"),
                 "tls_ms": row.get("tls_ms"),

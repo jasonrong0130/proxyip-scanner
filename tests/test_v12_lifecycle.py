@@ -39,11 +39,19 @@ class V12LifecycleTests(unittest.TestCase):
                         "final_available": 1,
                         "results": [{
                             "target": "156.244.57.227:443",
-                            "quality_score": 95,
+                            "exit_ip": "203.0.113.8",
+                            "quality_score": 100,
                             "avg_mbps": 120,
                             "tcp_ms": 38,
                             "tls_ms": 50,
-                            "purity": {"network_type": "机房IP", "is_idc": True},
+                            "purity": {
+                                "provider": "IPPure",
+                                "checked_ip": "203.0.113.8",
+                                "purity_score": 27,
+                                "risk_score": 27,
+                                "network_type": "非家宽IP",
+                                "is_residential": False,
+                            },
                             "success_count": 10,
                             "failure_count": 0,
                             "check_count": 10,
@@ -259,12 +267,16 @@ class V12LifecycleTests(unittest.TestCase):
         self.assertEqual(payload["total"], len(payload["results"]))
         self.assertEqual(payload["results"], [{
             "target": "156.244.57.227:443",
+            "exit_ip": "203.0.113.8",
             "region": "HK",
-            "quality_score": 95,
+            "quality_score": 73,
+            "purity_score": 27,
+            "purity_provider": "IPPure",
+            "purity_type": "非家宽IP",
             "avg_mbps": 120,
             "tcp_ms": 38,
             "tls_ms": 50,
-            "purity": "IDC",
+            "purity": "非家宽IP",
             "success_count": 10,
             "failure_count": 0,
             "check_count": 10,
@@ -289,10 +301,10 @@ class V12LifecycleTests(unittest.TestCase):
         csv_text = csv.body.decode("utf-8-sig")
         self.assertEqual(
             csv_text.splitlines()[0],
-            "节点,地区,质量分,速度(Mbps),延迟(ms),纯净度,成功率,更新时间",
+            "节点,出口IP,地区,纯净度(IPPure系数),速度(Mbps),延迟(ms),纯净类型,成功率,更新时间",
         )
         self.assertNotIn("1789815311", csv_text)
-        self.assertIn("156.244.57.227:443,HK,95,120,38,IDC,100%", csv_text)
+        self.assertIn("156.244.57.227:443,203.0.113.8,HK,27,120,38,非家宽IP,100%", csv_text)
         self.assertRegex(csv_text, r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
 
     def test_verified_frontend_uses_results_and_requested_layout(self) -> None:
@@ -300,7 +312,12 @@ class V12LifecycleTests(unittest.TestCase):
         verified_script = html[html.index("function renderVerifiedPool"):html.index("$('poolRegion').onchange")]
         self.assertNotIn("verifiedPreview", html)
         self.assertNotRegex(verified_script, r"(?:data|verifiedAll)\?*\.regions")
-        self.assertIn("data?.results", verified_script)
+        self.assertIn("verifiedData?.results", verified_script)
+        self.assertIn("VERIFIED_PAGE_SIZE=10", html)
+        self.assertIn("verifiedPrevBtn", html)
+        self.assertIn("verifiedNextBtn", html)
+        self.assertIn("verifiedPageInfo", html)
+        self.assertIn("r.exit_ip", verified_script)
 
         candidate_at = html.index('<div class="c6"><label>候选预览</label>')
         source_at = html.index('<div class="c6"><label>来源统计</label>')

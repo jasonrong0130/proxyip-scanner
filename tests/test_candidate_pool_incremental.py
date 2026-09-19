@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 import candidate_pool
+from purity import _normalize_ippure
 from quality_score import calculate_quality_score
 
 
@@ -56,6 +57,7 @@ class CandidatePoolIncrementalTests(unittest.TestCase):
                                 "final_available": True,
                                 "tcp_ms": 35,
                                 "tls_ms": 70,
+                                "purity": {"provider": "IPPure", "purity_score": 18, "risk_score": 18},
                             },
                             {
                                 "candidate": "1.1.1.1:443",
@@ -133,53 +135,27 @@ class CandidatePoolIncrementalTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_quality_score_rewards_verified_low_latency(self) -> None:
-        good = calculate_quality_score(
-            {
-                "final_available": True,
-                "tcp_ms": 40,
-                "sources": ["a", "b"],
-                "purity_score": 90,
-                "risk_score": 10,
-                "avg_mbps": 120,
-            }
-        )
-        bad = calculate_quality_score(
-            {
-                "final_available": False,
-                "last_checked_at": 1,
-                "consecutive_failures": 3,
-                "tcp_ms": 600,
-                "sources": ["a"],
-                "purity_score": 30,
-                "risk_score": 80,
-                "avg_mbps": 2,
-            }
-        )
-        self.assertGreater(good, bad)
+    def test_ippure_coefficient_is_returned_without_inversion(self) -> None:
+        self.assertEqual(_normalize_ippure({"fraudScore": 27})["purity_score"], 27)
 
-    def test_quality_score_rewards_stable_history(self) -> None:
-        stable = calculate_quality_score(
-            {
-                "final_available": True,
-                "check_count": 50,
-                "success_count": 48,
-                "tcp_ms": 60,
-                "avg_mbps": 80,
-                "sources": ["a", "b", "c"],
-            }
-        )
-        unstable = calculate_quality_score(
-            {
-                "final_available": True,
-                "check_count": 20,
-                "success_count": 5,
-                "tcp_ms": 60,
-                "avg_mbps": 80,
-                "sources": ["a", "b", "c"],
-            }
-        )
-        self.assertGreater(stable, unstable)
+    def test_quality_score_is_based_only_on_ippure_coefficient(self) -> None:
+        row = {
+            "final_available": False,
+            "check_count": 50,
+            "success_count": 1,
+            "tcp_ms": 900,
+            "avg_mbps": 1,
+            "purity": {"provider": "IPPure", "purity_score": 27, "risk_score": 27},
+        }
+        self.assertEqual(calculate_quality_score(row), 73)
+
+    def test_quality_score_ignores_non_purity_metrics_and_clamps(self) -> None:
+        fast = {"final_available": True, "tcp_ms": 10, "avg_mbps": 1000, "purity_score": 120}
+        slow = {"final_available": False, "tcp_ms": 900, "avg_mbps": 0, "purity_score": -10}
+        unchecked = {"final_available": True, "tcp_ms": 10, "avg_mbps": 1000}
+        self.assertEqual(calculate_quality_score(fast), 0)
+        self.assertEqual(calculate_quality_score(slow), 100)
+        self.assertEqual(calculate_quality_score(unchecked), 0)
 
     def test_candidate_keep_prefers_trusted_source(self) -> None:
         trusted = candidate_pool._candidate_keep_key({
