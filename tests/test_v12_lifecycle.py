@@ -194,6 +194,30 @@ class V12LifecycleTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_legacy_verified_pool_migrates_to_v12_store(self) -> None:
+        now = candidate_pool._now()
+        candidate_pool._save_json(
+            candidate_pool._region_pool_name("HK"),
+            {
+                "updated_at": now,
+                "count": 1,
+                "candidates": [
+                    {
+                        "target": "1.1.1.1:443",
+                        "final_available": True,
+                        "source": "legacy-source",
+                    }
+                ],
+            },
+        )
+        candidate_pool._save_json("candidate_pool_meta.json", {"region_counts": {"HK": {"count": 1}}})
+
+        verified = candidate_pool._verified_data()
+
+        self.assertEqual(verified["regions"]["HK"]["final_available"], 1)
+        self.assertEqual(verified["regions"]["HK"]["results"][0]["target"], "1.1.1.1:443")
+        self.assertTrue((candidate_pool._DATA_DIR / "candidate_verified.json").exists())
+
     def test_verified_exports_return_txt_and_csv(self) -> None:
         candidate_pool._save_json(
             "candidate_verified.json",

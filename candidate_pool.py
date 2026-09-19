@@ -648,6 +648,39 @@ def _verified_data() -> dict:
     if not isinstance(data, dict):
         data = {"regions": {}, "updated_at": None}
     data.setdefault("regions", {})
+    if not data.get("regions"):
+        data = _migrate_legacy_verified_pool(data)
+    return data
+
+
+def _migrate_legacy_verified_pool(data: dict) -> dict:
+    """Migrate legacy final_available rows into the v1.2 verified lifecycle store once."""
+    migrated = False
+    regions = data.setdefault("regions", {})
+    meta = _pool_meta()
+    for region in list((meta.get("region_counts") or {}).keys()):
+        pool = _load_region_pool(str(region).upper())
+        if not isinstance(pool, dict):
+            continue
+        rows = []
+        for row in list(pool.get("candidates") or []):
+            if not isinstance(row, dict) or row.get("final_available") is not True:
+                continue
+            item = dict(row)
+            item.setdefault("quality_score", row.get("quality_score", 0))
+            rows.append(item)
+        if rows:
+            code = str(region).upper()
+            regions[code] = {
+                "final_available": len(rows),
+                "updated_at": _now(),
+                "results": rows,
+            }
+            migrated = True
+        del pool
+    if migrated:
+        data["updated_at"] = _now()
+        _save_json("candidate_verified.json", data)
     return data
 
 
@@ -769,13 +802,16 @@ def _prune_pool_rows(rows: List[dict]) -> List[dict]:
     return retained[:POOL_MAX_PER_REGION]
 
 
-def _public_candidate(row: dict) -> dict:
-    # Quality/lifecycle data is deliberately backend-only; the existing UI stays unchanged.
+def _public_candidate(row: dict, include_quality: bool = False) -> dict:
+    # Candidate preview hides lifecycle internals. Verified pool exposes quality fields
+    # because it is the maintained production output pool.
     hidden = {
         "quality_score", "first_seen_at", "last_seen_at", "last_checked_at", "last_success_at",
         "last_failure_at", "check_count", "success_count", "failure_count", "consecutive_failures",
         "avg_mbps", "purity_score", "risk_score", "is_residential", "is_idc",
     }
+    if include_quality:
+        hidden -= {"quality_score", "avg_mbps", "purity_score", "risk_score"}
     return {key: value for key, value in row.items() if key not in hidden}
 
 
@@ -1618,7 +1654,7 @@ async def api_verified_pool(request: Request) -> dict:
             "region": region,
             "count": count,
             "updated_at": item.get("updated_at") if isinstance(item, dict) else None,
-            "top_nodes": [_public_candidate(row) for row in results[:5]],
+            "top_nodes": [_public_candidate(row, include_quality=True) for row in results[:5]],
         })
     return {"updated_at": data.get("updated_at"), "total": total, "regions": rows}
 
