@@ -49,7 +49,7 @@ Type=simple
 WorkingDirectory=$DIR
 EnvironmentFile=/etc/proxyip-scanner.env
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart=$DIR/.venv/bin/uvicorn app:app --host 127.0.0.1 --port 8788 --workers 1 --proxy-headers --forwarded-allow-ips=127.0.0.1,::1
+ExecStart=$DIR/.venv/bin/uvicorn --app-dir $DIR app:app --host 127.0.0.1 --port 8788 --workers 1 --proxy-headers --forwarded-allow-ips=127.0.0.1,::1
 Restart=on-failure
 RestartSec=3
 User=root
@@ -74,10 +74,17 @@ if [[ -z "$main_pid" || "$main_pid" == "0" ]]; then
   systemctl status proxyip-scanner --no-pager -l || true
   exit 1
 fi
-live_cwd="$(readlink -f "/proc/$main_pid/cwd" 2>/dev/null || true)"
-if [[ "$live_cwd" != "$DIR" ]]; then
-  echo "错误：运行中的服务目录不是 $DIR，而是 ${live_cwd:-未知}"
-  ps -fp "$main_pid" || true
+
+unit_workdir="$(systemctl show -p WorkingDirectory --value proxyip-scanner)"
+unit_exec="$(systemctl show -p ExecStart --value proxyip-scanner)"
+if [[ "$unit_workdir" != "$DIR" ]]; then
+  echo "错误：systemd WorkingDirectory 不是 $DIR，而是 ${unit_workdir:-未知}"
+  systemctl cat proxyip-scanner || true
+  exit 1
+fi
+if [[ "$unit_exec" != *"$DIR/.venv/bin/uvicorn"* || "$unit_exec" != *"--app-dir $DIR"* ]]; then
+  echo "错误：systemd ExecStart 没有固定到 $DIR"
+  systemctl cat proxyip-scanner || true
   exit 1
 fi
 
@@ -110,7 +117,7 @@ PY
     fi
     cat /tmp/proxyip-scanner-health.json
     echo
-    echo "运行目录: $live_cwd"
+    echo "systemd 工作目录: $unit_workdir"
     git -C "$DIR" log -1 --oneline
     exit 0
   fi
