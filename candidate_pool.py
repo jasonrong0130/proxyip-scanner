@@ -1696,6 +1696,22 @@ async def api_delete_source(source_id: str, request: Request) -> dict:
     return {"ok": True}
 
 
+def register_routes(app) -> None:
+    """Register candidate-pool endpoints directly on the main FastAPI app."""
+    if getattr(app.state, "_candidate_pool_routes_registered", False):
+        return
+    app.add_api_route("/api/candidate-regions", api_candidate_regions, methods=["GET"])
+    app.add_api_route("/api/candidate-pool", api_pool, methods=["GET"])
+    app.add_api_route("/api/candidate-pool/quality", api_pool_quality, methods=["GET"])
+    app.add_api_route("/api/candidate-pool/refresh", api_refresh, methods=["POST"])
+    app.add_api_route("/api/candidate-pool/recheck", api_recheck, methods=["POST"])
+    app.add_api_route("/api/candidate-sources", api_sources, methods=["GET"])
+    app.add_api_route("/api/candidate-sources", api_save_source, methods=["POST"])
+    app.add_api_route("/api/candidate-sources/{source_id}/test", api_test_source, methods=["POST"])
+    app.add_api_route("/api/candidate-sources/{source_id}", api_delete_source, methods=["DELETE"])
+    app.state._candidate_pool_routes_registered = True
+
+
 def configure(
     app,
     require_web_session,
