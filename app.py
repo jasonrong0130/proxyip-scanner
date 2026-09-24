@@ -1147,7 +1147,10 @@ async def _run_job_impl(job: dict) -> None:
         # EDT runtime verification must receive every TLS/HTTP reachable target,
         # not only Cloudflare-confirmed ProxyIP targets. Otherwise a node that
         # works in EDT/v2rayN but lacks CF headers is filtered out too early.
-        runtime_all = [i for i, r in enumerate(job["results"]) if isinstance(r, dict) and r.get("probe_reachable") is True]
+        runtime_all = [
+            i for i, r in enumerate(job["results"])
+            if isinstance(r, dict) and (r.get("probe_reachable") is True or r.get("available") is True)
+        ]
         for row in job["results"]:
             if row.get("available") is not True:
                 row["final_available"] = False
