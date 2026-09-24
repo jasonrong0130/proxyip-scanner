@@ -203,7 +203,7 @@ class CandidatePoolIncrementalTests(unittest.TestCase):
                     "candidates": [
                         {"target": "1.1.1.1:443", "region_hints": ["AR"]},
                         {"target": "2.2.2.2:443", "region_hints": ["AR"]},
-                        {"target": "3.3.3.3:443", "region_hints": []},
+                        {"target": "3.3.3.3:443", "region_hints": [], "source": "VPNGate", "sources": ["VPNGate"]},
                     ],
                 }
                 candidate_pool._save_json(candidate_pool._region_pool_name("AR"), data)
