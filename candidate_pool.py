@@ -38,10 +38,7 @@ _CONFIGURED = False
 REFRESH_INTERVAL = max(3600, int(os.environ.get("CANDIDATE_REFRESH_INTERVAL", str(6 * 3600))))
 RECHECK_INTERVAL = max(6 * 3600, int(os.environ.get("CANDIDATE_RECHECK_INTERVAL", str(24 * 3600))))
 AVAILABLE_RECHECK_INTERVAL = max(RECHECK_INTERVAL, int(os.environ.get("CANDIDATE_AVAILABLE_RECHECK_INTERVAL", str(7 * 24 * 3600))))
-MAX_PER_REGION = int(os.environ.get("CANDIDATE_MAX_PER_REGION", "0"))
 AUTO_RECHECK_LIMIT = max(100, min(5000, int(os.environ.get("CANDIDATE_AUTO_RECHECK_LIMIT", "500"))))
-POOL_MAX_PER_REGION = max(1000, min(200000, int(os.environ.get("CANDIDATE_POOL_MAX_PER_REGION", "30000"))))
-VERIFIED_MAX_PER_REGION = max(100, min(50000, int(os.environ.get("CANDIDATE_VERIFIED_MAX_PER_REGION", "5000"))))
 FAILED_RETRY_BASE = max(6 * 3600, int(os.environ.get("CANDIDATE_FAILED_RETRY_BASE", str(24 * 3600))))
 STALE_RETENTION = max(24 * 3600, int(os.environ.get("CANDIDATE_STALE_RETENTION", str(14 * 24 * 3600))))
 # Quality lifecycle cleanup. Failed low-value candidates should not consume the
@@ -583,6 +580,41 @@ def _record_region_meta(region: str, data: dict) -> None:
     _save_json("candidate_pool_meta.json", meta)
 
 
+def _candidate_belongs_to_region(row: dict, region: str) -> bool:
+    if not isinstance(row, dict):
+        return False
+    region = str(region or "").upper()
+    hints = {str(value or "").upper() for value in (row.get("region_hints") or []) if str(value or "").strip()}
+    return region in hints
+
+
+def _sanitize_region_pool(region: str, data: dict, persist: bool = False) -> dict:
+    region = str(region or "").upper()
+    rows = list(data.get("candidates") or [])
+    scoped = [row for row in rows if _candidate_belongs_to_region(row, region)]
+    if len(scoped) == len(rows):
+        data["count"] = len(scoped)
+        return data
+    data["candidates"] = scoped
+    data["count"] = len(scoped)
+    if persist:
+        _save_json(_region_pool_name(region), data)
+        _record_region_meta(region, data)
+    return data
+
+
+def _sanitize_all_region_pools() -> None:
+    meta = _pool_meta()
+    codes = list((meta.get("region_counts") or {}).keys())
+    for code in codes:
+        path = _path(_region_pool_name(code))
+        if not path.exists():
+            continue
+        value = _load_json(_region_pool_name(code), None)
+        if isinstance(value, dict):
+            _sanitize_region_pool(code, value, persist=True)
+
+
 def _load_region_pool(region: str, catalog: Optional[dict] = None) -> dict:
     region = str(region or "").upper()
     value = _load_json(_region_pool_name(region), None)
@@ -590,7 +622,7 @@ def _load_region_pool(region: str, catalog: Optional[dict] = None) -> dict:
         value.setdefault("candidates", [])
         value.setdefault("source_stats", [])
         value.setdefault("count", len(value.get("candidates") or []))
-        return value
+        return _sanitize_region_pool(region, value, persist=True)
 
     # During the first run after upgrading, lazily fall back to the old file.
     # Startup migration normally creates all split files before requests arrive.
@@ -641,47 +673,6 @@ def _migrate_legacy_pool() -> None:
     _save_json("candidate_pool_meta.json", meta)
     del legacy
     _release_memory()
-
-
-def _verified_data() -> dict:
-    data = _load_json("candidate_verified.json", {"regions": {}, "updated_at": None})
-    if not isinstance(data, dict):
-        data = {"regions": {}, "updated_at": None}
-    data.setdefault("regions", {})
-    if not data.get("regions"):
-        data = _migrate_legacy_verified_pool(data)
-    return data
-
-
-def _migrate_legacy_verified_pool(data: dict) -> dict:
-    """Migrate legacy final_available rows into the v1.2 verified lifecycle store once."""
-    migrated = False
-    regions = data.setdefault("regions", {})
-    meta = _pool_meta()
-    for region in list((meta.get("region_counts") or {}).keys()):
-        pool = _load_region_pool(str(region).upper())
-        if not isinstance(pool, dict):
-            continue
-        rows = []
-        for row in list(pool.get("candidates") or []):
-            if not isinstance(row, dict) or row.get("final_available") is not True:
-                continue
-            item = dict(row)
-            item.setdefault("quality_score", row.get("quality_score", 0))
-            rows.append(item)
-        if rows:
-            code = str(region).upper()
-            regions[code] = {
-                "final_available": len(rows),
-                "updated_at": _now(),
-                "results": rows,
-            }
-            migrated = True
-        del pool
-    if migrated:
-        data["updated_at"] = _now()
-        _save_json("candidate_verified.json", data)
-    return data
 
 
 def _source_quality_data() -> dict:
@@ -799,12 +790,11 @@ def _prune_pool_rows(rows: List[dict]) -> List[dict]:
         retained.append(row)
 
     retained.sort(key=_candidate_keep_key, reverse=True)
-    return retained[:POOL_MAX_PER_REGION]
+    return retained
 
 
 def _public_candidate(row: dict, include_quality: bool = False) -> dict:
-    # Candidate preview hides lifecycle internals. Verified pool exposes quality fields
-    # because it is the maintained production output pool.
+    # Candidate preview hides lifecycle internals; scan results remain in the regional pool.
     hidden = {
         "quality_score", "first_seen_at", "last_seen_at", "last_checked_at", "last_success_at",
         "last_failure_at", "check_count", "success_count", "failure_count", "consecutive_failures",
@@ -814,46 +804,6 @@ def _public_candidate(row: dict, include_quality: bool = False) -> dict:
         hidden -= {"quality_score", "avg_mbps", "purity_score", "risk_score"}
     return {key: value for key, value in row.items() if key not in hidden}
 
-
-def _verified_pool_payload(data: Optional[dict] = None) -> dict:
-    data = data or _verified_data()
-    results = []
-    for region, item in sorted((data.get("regions") or {}).items()):
-        if not isinstance(item, dict):
-            continue
-        for row in item.get("results") or []:
-            if not isinstance(row, dict):
-                continue
-            purity = row.get("purity")
-            if isinstance(purity, dict):
-                network_type = str(purity.get("network_type") or "")
-                if purity.get("is_idc") is True or network_type in {"IDC", "机房IP"}:
-                    purity = "IDC"
-                elif purity.get("is_residential") is True or network_type in {"Residential", "家宽IP", "家宽/运营商IP"}:
-                    purity = "Residential"
-                else:
-                    purity = network_type or "-"
-            elif not purity:
-                purity = "IDC" if row.get("is_idc") is True else ("Residential" if row.get("is_residential") is True else "-")
-            purity_data = row.get("purity") if isinstance(row.get("purity"), dict) else {}
-            results.append({
-                "target": row.get("target") or row.get("candidate") or "",
-                "exit_ip": row.get("exit_ip") or purity_data.get("checked_ip"),
-                "region": region,
-                "quality_score": calculate_quality_score(row),
-                "purity_score": extract_purity_score(row),
-                "purity_provider": purity_data.get("provider"),
-                "purity_type": purity_data.get("network_type"),
-                "avg_mbps": row.get("avg_mbps"),
-                "tcp_ms": row.get("tcp_ms"),
-                "tls_ms": row.get("tls_ms"),
-                "purity": purity,
-                "success_count": int(row.get("success_count") or 0),
-                "failure_count": int(row.get("failure_count") or 0),
-                "check_count": int(row.get("check_count") or 0),
-                "last_verified_at": row.get("last_verified_at") or item.get("updated_at") or data.get("updated_at"),
-            })
-    return {"updated_at": data.get("updated_at"), "total": len(results), "results": results}
 
 
 async def _run_source(name: str, region_hint: Optional[str], loader: Callable[[], Awaitable[List[str]]]) -> dict:
@@ -896,15 +846,11 @@ async def _region_sources(region: str) -> List[dict]:
             _run_source(f"Xiaobei 原始候选 {region}", region, lambda region=region: _fetch_xiaobei_raw(region)),
         ])
     work.append(_run_source(f"NiREvil {region}", region, lambda region=region: _fetch_country(region)))
-    work.append(_run_source("VPNGate", None, _fetch_vpngate))
-    work.append(_run_source("freesub", None, _fetch_freesub))
-    work.append(_run_source("公共 SOCKS5/HTTP proxy", None, _fetch_public_proxies))
     if region in REGIONS:
         if region in REGION_WORDS:
             work.append(_run_source(f"NiREvil Daily {region}", region, lambda region=region: _fetch_daily(region)))
         if region in CMLIU and region != "ALL":
             work.append(_run_source(f"CMliu {region}", region, lambda region=region: _resolve_dns(CMLIU[region])))
-        work.append(_run_source("EDT 动态域名组（全球补充）", None, lambda: _resolve_domains(DYNAMIC_DOMAINS)))
     if region == "US" and ENABLE_LEILAOMI:
         work.append(_run_source("LeilaoMi all/best", "US", _fetch_leilaomi))
     if ASN_DISCOVERY_ENABLED:
@@ -916,10 +862,10 @@ async def _region_sources(region: str) -> List[dict]:
         if row.get("enabled") is False:
             continue
         source_region = str(row.get("region") or "ALL").upper()
-        if source_region not in {"ALL", region}:
+        if source_region != region:
             continue
         custom_indexes.append(index)
-        work.append(_run_source(f"我的源 · {row.get('name') or '未命名'}", None if source_region == "ALL" else source_region, lambda row=row: _load_custom_source(row)))
+        work.append(_run_source(f"我的源 · {row.get('name') or '未命名'}", source_region, lambda row=row: _load_custom_source(row)))
 
     results = await asyncio.gather(*work)
 
@@ -1068,8 +1014,8 @@ def _sample_prefix_targets(prefixes: List[str], budget: int) -> List[str]:
 async def _discover_asn_candidates(region: str) -> List[str]:
     if not ASN_DISCOVERY_ENABLED:
         return []
-    verified = _verified_data().get("regions", {}).get(region) or {}
-    results = list(verified.get("results") or [])
+    pool = _load_region_pool(region)
+    results = [row for row in (pool.get("candidates") or []) if isinstance(row, dict) and row.get("final_available") is True]
     results.sort(key=lambda row: int(row.get("quality_score") or 0), reverse=True)
     asns: List[str] = []
     for row in results:
@@ -1079,6 +1025,7 @@ async def _discover_asn_candidates(region: str) -> List[str]:
             asns.append(digits)
         if len(asns) >= ASN_DISCOVERY_MAX_ASNS:
             break
+    del pool
     if not asns:
         return []
     asn_quality = _asn_quality_data().get("asns") or {}
@@ -1170,7 +1117,10 @@ async def get_scan_targets(region: str = "HK", limit: Optional[int] = None, forc
         if _path(_region_pool_name(region)).exists():
             data = _load_region_pool(region)
         else:
-            data = await refresh_region(region)
+            catalog = await _region_catalog()
+            data = _catalog_pool(region, catalog)
+            _save_json(_region_pool_name(region), data)
+            _record_region_meta(region, data)
         collect(list(data.get("candidates") or []))
         del data
         _release_memory()
@@ -1229,14 +1179,12 @@ async def _build_region_data(region: str, catalog: dict) -> dict:
         candidates.append(row)
 
     for key, old in previous.items():
-        if key in merged:
+        if key in merged or not _candidate_belongs_to_region(old, region):
             continue
         if old.get("final_available") is True or ts - float(old.get("last_seen_at") or ts) <= STALE_RETENTION:
             candidates.append(old)
 
     candidates = _prune_pool_rows(candidates)
-    if MAX_PER_REGION > 0:
-        candidates = candidates[:MAX_PER_REGION]
     data = {"updated_at": ts, "count": len(candidates), "candidates": candidates, "source_stats": stats}
     del source_rows, merged, seen, previous_data, previous_rows, previous
     _release_memory()
@@ -1283,7 +1231,7 @@ async def refresh_all() -> dict:
 
 
 async def record_scan_results(region: str, results: List[dict], count_check: bool = True) -> dict:
-    """Merge scan outcomes into split lifecycle storage and the verified pool."""
+    """Merge scan outcomes into the regional lifecycle pool."""
     region = str(region or "").upper()
     if region != "ALL" and not re.fullmatch(r"[A-Z]{2}", region):
         raise ValueError("unsupported region")
@@ -1293,19 +1241,16 @@ async def record_scan_results(region: str, results: List[dict], count_check: boo
         if isinstance(row, dict) and str(row.get("candidate") or row.get("input") or "").strip()
     }
     if not result_map:
-        return {"tested": 0, "verified": 0}
+        return {"tested": 0, "final_available": 0}
 
     ts = _now()
     total_touched = 0
+    final_available_total = 0
     async with _STATE_LOCK:
-        verified = _verified_data()
         meta = _pool_meta()
         source_quality = _source_quality_data() if count_check else None
         asn_quality = _asn_quality_data() if count_check else None
-        if region == "ALL":
-            region_codes = list((meta.get("region_counts") or {}).keys()) or list(REGIONS)
-        else:
-            region_codes = [region]
+        region_codes = (list((meta.get("region_counts") or {}).keys()) or list(REGIONS)) if region == "ALL" else [region]
 
         for code in region_codes:
             pool_path = _path(_region_pool_name(code))
@@ -1313,15 +1258,8 @@ async def record_scan_results(region: str, results: List[dict], count_check: boo
                 continue
             region_data = _load_region_pool(code)
             candidates = list(region_data.get("candidates") or [])
-            existing_verified = ((verified.get("regions") or {}).get(code) or {}).get("results") or []
-            verified_map = {
-                str(row.get("candidate") or row.get("input") or "").strip().lower(): row
-                for row in existing_verified
-                if isinstance(row, dict) and str(row.get("candidate") or row.get("input") or "").strip()
-            }
-
             touched = 0
-            base_available = 0
+
             for candidate in candidates:
                 key = str(candidate.get("target") or "").strip().lower()
                 result = result_map.get(key)
@@ -1352,13 +1290,12 @@ async def record_scan_results(region: str, results: List[dict], count_check: boo
                 if isinstance(speed, dict) and speed.get("avg_mbps") is not None:
                     candidate["avg_mbps"] = speed.get("avg_mbps")
                 purity = result.get("purity") or {}
-                if isinstance(purity, dict):
+                if isinstance(purity, dict) and purity:
+                    candidate["purity"] = dict(purity)
                     for source_field in ("purity_score", "risk_score", "is_residential", "is_idc"):
                         if purity.get(source_field) is not None:
                             candidate[source_field] = purity.get(source_field)
 
-                if result.get("available") is True:
-                    base_available += 1
                 apply_quality_score(candidate)
                 if count_check:
                     source_names = list(candidate.get("sources") or [])
@@ -1370,72 +1307,27 @@ async def record_scan_results(region: str, results: List[dict], count_check: boo
                     asn = _row_asn(result) or _row_asn(candidate)
                     if asn:
                         _record_asn_feedback(asn_quality, asn, final_ok, score)
-                if final_ok:
-                    item = dict(candidate)
-                    for result_key, result_value in result.items():
-                        if result_value is not None:
-                            item[result_key] = result_value
-                    for preserve_key in (
-                        "sources", "success_count", "failure_count", "avg_mbps",
-                        "purity", "tcp_ms", "tls_ms", "quality_score",
-                    ):
-                        if candidate.get(preserve_key) is not None:
-                            item[preserve_key] = candidate.get(preserve_key)
-                    item["quality_score"] = int(candidate.get("quality_score") or item.get("quality_score") or 0)
-                    item["last_verified_at"] = ts
-                    verified_map[key] = item
-                else:
-                    verified_map.pop(key, None)
 
-            if not touched:
-                del region_data, candidates, verified_map
-                _release_memory()
-                continue
+            if touched:
+                candidates = _prune_pool_rows(candidates)
+                region_data["candidates"] = candidates
+                region_data["count"] = len(candidates)
+                region_data["updated_at"] = ts
+                _save_json(_region_pool_name(code), region_data)
+                _record_region_meta(code, region_data)
 
-            candidates = _prune_pool_rows(candidates)
-            region_data["candidates"] = candidates
-            region_data["count"] = len(candidates)
-            region_data["updated_at"] = ts
-            _save_json(_region_pool_name(code), region_data)
-            _record_region_meta(code, region_data)
-
-            verified_rows = list(verified_map.values())
-            verified_rows.sort(
-                key=lambda row: (
-                    int(row.get("quality_score") or 0),
-                    int(row.get("success_count") or 0),
-                    len(row.get("sources") or []),
-                    -float(row.get("tcp_ms") if isinstance(row.get("tcp_ms"), (int, float)) else 1e9),
-                    float(row.get("last_verified_at") or 0),
-                ),
-                reverse=True,
-            )
-            verified_rows = verified_rows[:VERIFIED_MAX_PER_REGION]
-            previous = (verified.get("regions") or {}).get(code) or {}
-            verified["regions"][code] = {
-                "updated_at": ts,
-                "tested": touched if count_check else int(previous.get("tested") or 0),
-                "tested_total": int(previous.get("tested_total") or 0) + (touched if count_check else 0),
-                "base_available": base_available,
-                "final_available": len(verified_rows),
-                "results": verified_rows,
-            }
-            del region_data, candidates, verified_map, verified_rows
+            final_available_total += sum(1 for row in candidates if row.get("final_available") is True)
+            del region_data, candidates
             _release_memory()
 
-        verified["updated_at"] = ts
-        _save_json("candidate_verified.json", verified)
         if count_check:
             source_quality["updated_at"] = ts
             asn_quality["updated_at"] = ts
             _save_json("source_quality.json", source_quality)
             _save_json("asn_quality.json", asn_quality)
-        verified_total = sum(
-            int((row or {}).get("final_available") or 0)
-            for row in (verified.get("regions") or {}).values()
-        )
+
     _release_memory()
-    return {"tested": total_touched, "verified": verified_total}
+    return {"tested": total_touched, "final_available": final_available_total}
 
 
 async def recheck_region(region: str, limit: Optional[int] = None, force: bool = False) -> dict:
@@ -1449,10 +1341,11 @@ async def recheck_region(region: str, limit: Optional[int] = None, force: bool =
     cap = max(1, min(int(limit or AUTO_RECHECK_LIMIT), AUTO_RECHECK_LIMIT))
     candidates = await get_scan_targets(region, cap, force=force)
     if not candidates:
-        existing = _verified_data().get("regions", {}).get(region) or {}
+        existing = _load_region_pool(region)
+        rows = list(existing.get("candidates") or [])
         return {
             "updated_at": existing.get("updated_at"), "tested": 0, "base_available": 0,
-            "final_available": int(existing.get("final_available") or 0), "results": list(existing.get("results") or []),
+            "final_available": sum(1 for row in rows if row.get("final_available") is True), "results": [],
         }
     sem = asyncio.Semaphore(50)
 
@@ -1489,17 +1382,18 @@ async def recheck_region(region: str, limit: Optional[int] = None, force: bool =
     checked_map = {str(row.get("candidate") or "").lower(): row for row in checked}
     outcomes = [checked_map.get(str(row.get("candidate") or "").lower(), row) for row in base_rows]
     await record_scan_results(region, outcomes)
-    verified_row = _verified_data().get("regions", {}).get(region) or {}
+    region_row = _load_region_pool(region)
+    region_rows = list(region_row.get("candidates") or [])
     meta = _load_json("candidate_pool_meta.json", {})
     meta["last_recheck_at"] = _now()
     meta.setdefault("last_recheck_by_region", {})[region] = _now()
     _save_json("candidate_pool_meta.json", meta)
     return {
-        "updated_at": verified_row.get("updated_at"),
+        "updated_at": region_row.get("updated_at"),
         "tested": len(candidates),
         "base_available": len(base_ok),
-        "final_available": int(verified_row.get("final_available") or 0),
-        "results": list(verified_row.get("results") or []),
+        "final_available": sum(1 for row in region_rows if row.get("final_available") is True),
+        "results": [],
     }
 
 
@@ -1578,7 +1472,6 @@ async def api_pool(request: Request, region: str = "HK", preview_limit: int = 30
     _auth(request)
     region = region.upper()
     preview_limit = max(0, min(int(preview_limit or 0), 1000))
-    verified = _verified_data()
     catalog = await _region_catalog()
 
     if region == "ALL":
@@ -1676,11 +1569,6 @@ async def api_pool(request: Request, region: str = "HK", preview_limit: int = 30
         "recheck_interval": RECHECK_INTERVAL,
     }
 
-
-@router.get("/api/candidate-pool/verified")
-async def api_verified_pool(request: Request) -> dict:
-    _auth(request)
-    return _verified_pool_payload()
 
 
 @router.get("/api/candidate-pool/quality")
@@ -1827,6 +1715,11 @@ def configure(
         # v1.1.0 originally stored every region in one large JSON file. Split it
         # once at startup so normal reads and refreshes never hydrate all regions.
         await asyncio.to_thread(_migrate_legacy_pool)
+        await asyncio.to_thread(_sanitize_all_region_pools)
+        try:
+            _path("candidate_verified.json").unlink(missing_ok=True)
+        except OSError:
+            pass
         if _BACKGROUND_TASK is None or _BACKGROUND_TASK.done():
             _BACKGROUND_TASK = asyncio.create_task(_background_loop())
 
