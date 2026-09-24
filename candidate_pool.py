@@ -1722,8 +1722,6 @@ def configure(
         except Exception:
             _DEFAULT_SNI = ""
     _DEFAULT_PATH = str(default_probe_path or "/cdn-cgi/trace")
-    app.include_router(router)
-
     async def startup() -> None:
         global _BACKGROUND_TASK
         # v1.1.0 originally stored every region in one large JSON file. Split it
