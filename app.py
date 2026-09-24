@@ -33,7 +33,7 @@ STATIC_DIR = APP_DIR / "static"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 APP_NAME = "ProxyIP Scanner"
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.2.2"
 CHECK_CONCURRENCY_OPTIONS = (20, 50, 100, 200)
 CLOUDFLARE_HTTPS_PORTS = (443, 2053, 2083, 2087, 2096, 8443)
 DEFAULT_SCAN_PORTS = (443,)
@@ -2689,6 +2689,10 @@ async def edt_check_batch(
         "total": len(results), "available": sum(1 for r in results if r.get("available")),
         "results": results,
     }
+
+# Mount the candidate-pool router explicitly on the main FastAPI application.
+# Configuration below only injects dependencies and lifecycle hooks.
+app.include_router(candidate_pool.router)
 
 # Candidate pool is configured after all auth/probe helpers and routes exist.
 candidate_pool.configure(
