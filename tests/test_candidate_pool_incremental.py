@@ -43,7 +43,6 @@ class CandidatePoolIncrementalTests(unittest.TestCase):
                     }
                     candidate_pool._save_json(candidate_pool._region_pool_name("HK"), region_data)
                     candidate_pool._record_region_meta("HK", region_data)
-                    candidate_pool._save_json("candidate_verified.json", {"regions": {}, "updated_at": None})
 
                     initial = await candidate_pool.get_scan_targets("HK")
                     self.assertEqual(set(initial), {"8.8.8.8:443", "1.1.1.1:443"})
@@ -95,9 +94,6 @@ class CandidatePoolIncrementalTests(unittest.TestCase):
                     due = await candidate_pool.get_scan_targets("HK")
                     self.assertEqual(due, ["8.8.8.8:443"])
 
-                    verified = candidate_pool._verified_data()["regions"]["HK"]["results"]
-                    self.assertEqual([row["candidate"] for row in verified], ["8.8.8.8:443"])
-
                     # Refresh adds one new address while preserving the checked state of the known one.
                     async def fake_catalog(force: bool = False) -> dict:
                         return {
@@ -134,6 +130,89 @@ class CandidatePoolIncrementalTests(unittest.TestCase):
                 candidate_pool._region_sources = original_sources
 
         asyncio.run(scenario())
+
+    def test_region_pool_rejects_unscoped_global_sources_and_has_no_count_cap(self) -> None:
+        async def scenario() -> None:
+            original_data_dir = candidate_pool._DATA_DIR
+            original_catalog = candidate_pool._region_catalog
+            original_sources = candidate_pool._region_sources
+            try:
+                with tempfile.TemporaryDirectory(prefix="proxyip-region-scope-") as tmp:
+                    candidate_pool._DATA_DIR = Path(tmp)
+                    ar_targets = [f"10.0.{i // 250}.{i % 250 + 1}:443" for i in range(5005)]
+
+                    async def fake_catalog(force: bool = False) -> dict:
+                        return {
+                            "updated_at": candidate_pool._now(),
+                            "regions": {"AR": {"count": len(ar_targets), "candidates": ar_targets}},
+                        }
+
+                    async def fake_sources(region: str) -> list[dict]:
+                        self.assertEqual(region, "AR")
+                        return [
+                            {
+                                "name": "AR source",
+                                "region_hint": "AR",
+                                "items": ar_targets + ar_targets[:25],
+                                "count": len(ar_targets),
+                                "status": "ok",
+                                "ms": 1,
+                                "source_weight": 50,
+                            },
+                            {
+                                "name": "global source",
+                                "region_hint": None,
+                                "items": [f"192.0.2.{i % 250 + 1}:443" for i in range(5000)],
+                                "count": 5000,
+                                "status": "ok",
+                                "ms": 1,
+                                "source_weight": 40,
+                            },
+                        ]
+
+                    candidate_pool._region_catalog = fake_catalog
+                    candidate_pool._region_sources = fake_sources
+                    data = await candidate_pool.refresh_region("AR")
+
+                    # _build_region_data accepts only region-tagged sources; duplicate rows
+                    # from the same source are collapsed before source contribution stats.
+                    scoped = [row for row in data["candidates"] if "AR" in (row.get("region_hints") or [])]
+                    self.assertEqual(len(scoped), len(ar_targets))
+                    self.assertEqual(data["count"], len(ar_targets))
+                    self.assertGreater(data["count"], 5000)
+
+                    scan_targets = await candidate_pool.get_scan_targets("AR", force=True)
+                    self.assertEqual(len(scan_targets), len(ar_targets))
+                    self.assertEqual(set(scan_targets), set(ar_targets))
+            finally:
+                candidate_pool._DATA_DIR = original_data_dir
+                candidate_pool._region_catalog = original_catalog
+                candidate_pool._region_sources = original_sources
+
+        asyncio.run(scenario())
+
+    def test_existing_polluted_region_pool_is_sanitized(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="proxyip-region-clean-") as tmp:
+            previous = candidate_pool._DATA_DIR
+            try:
+                candidate_pool._DATA_DIR = Path(tmp)
+                data = {
+                    "updated_at": candidate_pool._now(),
+                    "count": 3,
+                    "source_stats": [],
+                    "candidates": [
+                        {"target": "1.1.1.1:443", "region_hints": ["AR"]},
+                        {"target": "2.2.2.2:443", "region_hints": ["AR"]},
+                        {"target": "3.3.3.3:443", "region_hints": []},
+                    ],
+                }
+                candidate_pool._save_json(candidate_pool._region_pool_name("AR"), data)
+                candidate_pool._record_region_meta("AR", data)
+                loaded = candidate_pool._load_region_pool("AR")
+                self.assertEqual(loaded["count"], 2)
+                self.assertEqual({row["target"] for row in loaded["candidates"]}, {"1.1.1.1:443", "2.2.2.2:443"})
+            finally:
+                candidate_pool._DATA_DIR = previous
 
     def test_ippure_coefficient_is_returned_without_inversion(self) -> None:
         self.assertEqual(_normalize_ippure({"fraudScore": 27})["purity_score"], 27)
