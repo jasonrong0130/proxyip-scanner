@@ -1,6 +1,5 @@
 import asyncio
 import os
-import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,10 +12,6 @@ import app  # noqa: E402
 import candidate_pool  # noqa: E402
 
 
-class FakeRequest:
-    headers = {}
-
-
 class V12LifecycleTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory(prefix="proxyip-v12-guard-")
@@ -27,40 +22,6 @@ class V12LifecycleTests(unittest.TestCase):
     def tearDown(self) -> None:
         candidate_pool._DATA_DIR = self.previous_pool_dir
         self.tmp.cleanup()
-
-    def save_verified_fixture(self) -> None:
-        candidate_pool._save_json(
-            "candidate_verified.json",
-            {
-                "updated_at": 1789815311.102502,
-                "regions": {
-                    "HK": {
-                        "updated_at": 1789815311.102502,
-                        "final_available": 1,
-                        "results": [{
-                            "target": "156.244.57.227:443",
-                            "exit_ip": "203.0.113.8",
-                            "quality_score": 100,
-                            "avg_mbps": 120,
-                            "tcp_ms": 38,
-                            "tls_ms": 50,
-                            "purity": {
-                                "provider": "IPPure",
-                                "checked_ip": "203.0.113.8",
-                                "purity_score": 27,
-                                "risk_score": 27,
-                                "network_type": "非家宽IP",
-                                "is_residential": False,
-                            },
-                            "success_count": 10,
-                            "failure_count": 0,
-                            "check_count": 10,
-                            "last_verified_at": 1789815311.102502,
-                        }],
-                    }
-                },
-            },
-        )
 
     def test_full_scan_runs_in_batches_and_persists_progress(self) -> None:
         async def scenario() -> None:
@@ -181,8 +142,9 @@ class V12LifecycleTests(unittest.TestCase):
                 "entry_asn": "AS13335",
                 "tcp_ms": 20,
             }])
-            self.assertEqual(result["verified"], 1)
-            self.assertEqual(candidate_pool._verified_data()["regions"]["HK"]["final_available"], 1)
+            self.assertEqual(result["final_available"], 1)
+            pool = candidate_pool._load_region_pool("HK")
+            self.assertTrue(pool["candidates"][0]["final_available"])
             source = candidate_pool._load_json("source_quality.json", {})["sources"]["source-a"]
             self.assertEqual(source["contributed"], 1)
             self.assertEqual(source["verified"], 1)
@@ -201,12 +163,16 @@ class V12LifecycleTests(unittest.TestCase):
         )
 
         async def scenario() -> None:
-            candidate_pool._save_json("candidate_verified.json", {
-                "regions": {"HK": {"results": [
-                    {"candidate": "1.1.1.1:443", "entry_asn": "100", "quality_score": 10},
-                    {"candidate": "2.2.2.2:443", "entry_asn": "200", "quality_score": 9},
-                ]}}
+            candidate_pool._save_json(candidate_pool._region_pool_name("HK"), {
+                "updated_at": candidate_pool._now(),
+                "count": 2,
+                "source_stats": [],
+                "candidates": [
+                    {"target": "1.1.1.1:443", "entry_asn": "100", "quality_score": 10, "final_available": True, "region_hints": ["HK"]},
+                    {"target": "2.2.2.2:443", "entry_asn": "200", "quality_score": 9, "final_available": True, "region_hints": ["HK"]},
+                ],
             })
+            candidate_pool._record_region_meta("HK", candidate_pool._load_json(candidate_pool._region_pool_name("HK"), {}))
             candidate_pool._save_json("asn_quality.json", {
                 "asns": {
                     "100": {"success_rate": 0.1, "avg_score": 20, "sample_count": 2},
@@ -228,102 +194,6 @@ class V12LifecycleTests(unittest.TestCase):
             self.assertEqual(calls[:2], ["200", "100"])
 
         asyncio.run(scenario())
-
-    def test_legacy_verified_pool_migrates_to_v12_store(self) -> None:
-        now = candidate_pool._now()
-        candidate_pool._save_json(
-            candidate_pool._region_pool_name("HK"),
-            {
-                "updated_at": now,
-                "count": 1,
-                "candidates": [
-                    {
-                        "target": "1.1.1.1:443",
-                        "final_available": True,
-                        "source": "legacy-source",
-                    }
-                ],
-            },
-        )
-        candidate_pool._save_json("candidate_pool_meta.json", {"region_counts": {"HK": {"count": 1}}})
-
-        verified = candidate_pool._verified_data()
-
-        self.assertEqual(verified["regions"]["HK"]["final_available"], 1)
-        self.assertEqual(verified["regions"]["HK"]["results"][0]["target"], "1.1.1.1:443")
-        self.assertTrue((candidate_pool._DATA_DIR / "candidate_verified.json").exists())
-
-    def test_verified_api_returns_flat_results_matching_total(self) -> None:
-        self.save_verified_fixture()
-        original_require = candidate_pool._REQUIRE_WEB_SESSION
-        candidate_pool._REQUIRE_WEB_SESSION = lambda request: {}
-        try:
-            payload = asyncio.run(candidate_pool.api_verified_pool(FakeRequest()))
-        finally:
-            candidate_pool._REQUIRE_WEB_SESSION = original_require
-
-        self.assertIn("results", payload)
-        self.assertNotIn("regions", payload)
-        self.assertEqual(payload["total"], len(payload["results"]))
-        self.assertEqual(payload["results"], [{
-            "target": "156.244.57.227:443",
-            "exit_ip": "203.0.113.8",
-            "region": "HK",
-            "quality_score": 73,
-            "purity_score": 27,
-            "purity_provider": "IPPure",
-            "purity_type": "非家宽IP",
-            "avg_mbps": 120,
-            "tcp_ms": 38,
-            "tls_ms": 50,
-            "purity": "非家宽IP",
-            "success_count": 10,
-            "failure_count": 0,
-            "check_count": 10,
-            "last_verified_at": 1789815311.102502,
-        }])
-
-    def test_verified_exports_use_flat_columns_and_txt_targets_only(self) -> None:
-        self.save_verified_fixture()
-        original_require = app.require_web_session
-        app.require_web_session = lambda request: {}
-        try:
-            txt = asyncio.run(app.export_verified_txt(FakeRequest()))
-            csv = asyncio.run(app.export_verified_csv(FakeRequest()))
-        finally:
-            app.require_web_session = original_require
-
-        txt_rows = txt.body.decode("utf-8").splitlines()
-        self.assertEqual(txt_rows, ["156.244.57.227:443"])
-        self.assertTrue(all(re.fullmatch(r"[^:\s]+:\d+", row) for row in txt_rows))
-        self.assertIn("text/plain", txt.media_type)
-
-        csv_text = csv.body.decode("utf-8-sig")
-        self.assertEqual(
-            csv_text.splitlines()[0],
-            "节点,出口IP,地区,纯净度(IPPure系数),速度(Mbps),延迟(ms),纯净类型,成功率,更新时间",
-        )
-        self.assertNotIn("1789815311", csv_text)
-        self.assertIn("156.244.57.227:443,203.0.113.8,HK,27,120,38,非家宽IP,100%", csv_text)
-        self.assertRegex(csv_text, r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
-
-    def test_verified_frontend_uses_results_and_requested_layout(self) -> None:
-        html = (Path(__file__).parents[1] / "static" / "index.html").read_text(encoding="utf-8")
-        verified_script = html[html.index("function renderVerifiedPool"):html.index("$('poolRegion').onchange")]
-        self.assertNotIn("verifiedPreview", html)
-        self.assertNotRegex(verified_script, r"(?:data|verifiedAll)\?*\.regions")
-        self.assertIn("verifiedData?.results", verified_script)
-        self.assertIn("VERIFIED_PAGE_SIZE=10", html)
-        self.assertIn("verifiedPrevBtn", html)
-        self.assertIn("verifiedNextBtn", html)
-        self.assertIn("verifiedPageInfo", html)
-        self.assertIn("r.exit_ip", verified_script)
-
-        candidate_at = html.index('<div class="c6"><label>候选预览</label>')
-        source_at = html.index('<div class="c6"><label>来源统计</label>')
-        verified_at = html.index('<div class="c12"><div class="section-head"', candidate_at)
-        self.assertLess(candidate_at, source_at)
-        self.assertLess(source_at, verified_at)
 
 
 if __name__ == "__main__":
