@@ -2542,42 +2542,6 @@ async def delete_job(job_id: str, request: Request) -> dict:
     return {"ok": True, "id": job_id, **result}
 
 
-@app.get("/api/candidate-pool/verified/export.txt")
-async def export_verified_txt(request: Request) -> Response:
-    require_web_session(request)
-    data = candidate_pool._verified_pool_payload()
-    rows = [str(row["target"]) for row in data["results"] if row.get("target")]
-    return Response("\n".join(dict.fromkeys(rows)) + ("\n" if rows else ""), media_type="text/plain; charset=utf-8", headers={"Content-Disposition": 'attachment; filename="verified-proxyip.txt"'})
-
-
-@app.get("/api/candidate-pool/verified/export.csv")
-async def export_verified_csv(request: Request) -> Response:
-    require_web_session(request)
-    data = candidate_pool._verified_pool_payload()
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(["节点", "出口IP", "地区", "纯净度(IPPure系数)", "速度(Mbps)", "延迟(ms)", "纯净类型", "成功率", "更新时间"])
-    for row in data["results"]:
-        try:
-            updated = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(row.get("last_verified_at"))))
-        except (TypeError, ValueError, OSError, OverflowError):
-            updated = "-"
-        checks = row["check_count"]
-        rate = round(row["success_count"] / checks * 100, 1) if checks else None
-        writer.writerow([
-            row["target"],
-            row["exit_ip"] or "-",
-            row["region"],
-            row["purity_score"] if row["purity_score"] is not None else "未检测",
-            row["avg_mbps"] if row["avg_mbps"] is not None else "-",
-            row["tcp_ms"] if row["tcp_ms"] is not None else "-",
-            row["purity_type"] or "-",
-            f"{rate:g}%" if rate is not None else "-",
-            updated,
-        ])
-    return Response("\ufeff" + output.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": 'attachment; filename="verified-proxyip.csv"'})
-
-
 @app.get("/api/jobs/{job_id}/export.csv")
 async def export_csv(job_id: str, request: Request) -> Response:
     require_web_session(request)
