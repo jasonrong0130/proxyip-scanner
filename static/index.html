@@ -76,6 +76,7 @@
 </div><div class="actions" style="justify-content:flex-end;margin-top:16px"><button id="confirmExportBtn">导出所选字段</button></div></div></div>
 
 <script>
+let csrf='',cfg=null,current=null,jobId=null,timer=null,page=1,selected=new Set(),editSourceId=null,poolData=null,poolLoadedRegion=null,poolLoadedCount=0,resultRows=[],resultMeta={total:0,pages:1,page:1,entry_facets:[],exit_facets:[],final_available_count:0},pollBusy=false,resultSeq=0;
 const $=id=>document.getElementById(id);
 const STATE_ZH={queued:'排队中',checking:'一级检测中',runtime_checking:'EDT 真连接检测中',paused:'已暂停',speeding:'测速中',speed_paused:'测速已暂停',purity_checking:'纯净度检测中',purity_paused:'纯净度已暂停',completed:'已完成',cancelled:'已停止',interrupted:'已中断'};
 const REGION_ZH={HK:'香港',JP:'日本',SG:'新加坡',KR:'韩国',IN:'印度',US:'美国',DE:'德国',IE:'爱尔兰',GB:'英国',FR:'法国',NL:'荷兰',CA:'加拿大',AU:'澳大利亚',CL:'智利',CN:'中国大陆',TW:'台湾',MO:'澳门'};
@@ -139,7 +140,7 @@ async function startScan(){
  try{
   const speedMode=$('speedEnabled').value,sp=speedProfile(speedMode);
   const body={probe_sni:sni,probe_path:$('probePath').value||'/cdn-cgi/trace',generic_sni:'',expect_cloudflare:$('expectCf').value==='1',check_concurrency:Number($('checkConcurrency').value),scan_ports:scanPorts(),timeout:Number($('timeout').value||7),edt_runtime:{enabled:$('edtEnabled').value==='1'},speed:{enabled:speedMode!=='0',mode:sp.mode,bytes:sp.bytes,concurrency:sp.concurrency,repeats:sp.repeats}};
-  if(poolLoadedRegion){body.candidate_region=poolLoadedRegion;}else body.targets=targets;
+  if(poolLoadedRegion){body.candidate_region=poolLoadedRegion;body.force_scan=true;}else body.targets=targets;
   const d=await api('/api/jobs',{method:'POST',body:JSON.stringify(body)});jobId=d.id;clearInterval(timer);timer=null;await poll();if(jobIsActive(current?.state))timer=setInterval(poll,1500);
  }catch(e){alert(e.message);$('startBtn').disabled=false;}
 }
