@@ -104,8 +104,8 @@ with open("/tmp/proxyip-scanner-health.json", "r", encoding="utf-8") as fh:
     print(json.load(fh).get("version", ""))
 PY
 )"
-    if [[ "$version" != "1.2.1" ]]; then
-      echo "错误：运行版本为 ${version:-未知}，预期 1.2.1。"
+    if [[ "$version" != "1.2.2" ]]; then
+      echo "错误：运行版本为 ${version:-未知}，预期 1.2.2。"
       exit 1
     fi
     cat /tmp/proxyip-scanner-health.json
