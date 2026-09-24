@@ -33,7 +33,7 @@ STATIC_DIR = APP_DIR / "static"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 APP_NAME = "ProxyIP Scanner"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 CHECK_CONCURRENCY_OPTIONS = (20, 50, 100, 200)
 CLOUDFLARE_HTTPS_PORTS = (443, 2053, 2083, 2087, 2096, 8443)
 DEFAULT_SCAN_PORTS = (443,)
@@ -1566,7 +1566,10 @@ def clamp_float(value: Any, default: float, low: float, high: float) -> float:
 
 @app.get("/", response_class=HTMLResponse)
 async def root() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(
+        STATIC_DIR / "index.html",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache"},
+    )
 
 
 @app.get("/health")
