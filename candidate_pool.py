@@ -585,7 +585,17 @@ def _candidate_belongs_to_region(row: dict, region: str) -> bool:
         return False
     region = str(region or "").upper()
     hints = {str(value or "").upper() for value in (row.get("region_hints") or []) if str(value or "").strip()}
-    return region in hints
+    if hints:
+        return region in hints
+    source_names = {str(value or "").strip().lower() for value in (row.get("sources") or []) if str(value or "").strip()}
+    if row.get("source"):
+        source_names.add(str(row.get("source") or "").strip().lower())
+    known_global = ("vpngate", "freesub", "公共 socks5/http proxy", "edt 动态域名组（全球补充）")
+    if any(any(marker in name for marker in known_global) for name in source_names):
+        return False
+    # Older regional records did not always carry region_hints. Preserve those
+    # unless they are identifiable as one of the known global sources above.
+    return True
 
 
 def _sanitize_region_pool(region: str, data: dict, persist: bool = False) -> dict:
