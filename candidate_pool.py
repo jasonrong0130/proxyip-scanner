@@ -1136,6 +1136,11 @@ async def _build_region_data(region: str, catalog: dict) -> dict:
     seen = set()
     stats = []
     for source in source_rows:
+        # A regional pool may only consume a source that explicitly belongs to
+        # that region. This is the final guard against accidental global-source
+        # pollution if a future source is wired incorrectly upstream.
+        if str(source.get("region_hint") or "").upper() != region:
+            continue
         contributed = 0
         for target in source.get("items", []):
             key = target.lower()
