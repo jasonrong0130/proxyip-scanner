@@ -29,12 +29,17 @@ for i in {1..30}; do
   if curl -fsS http://127.0.0.1:8788/health >/tmp/proxyip-scanner-health.json; then
     root_html="$(curl -fsS http://127.0.0.1:8788/ || true)"
     pool_code="$(curl -sS -o /dev/null -w '%{http_code}' 'http://127.0.0.1:8788/api/candidate-pool?region=HK' || true)"
+    sources_code="$(curl -sS -o /dev/null -w '%{http_code}' 'http://127.0.0.1:8788/api/candidate-sources' || true)"
     if [[ "$root_html" == *"已验证 ProxyIP 池"* ]]; then
       echo "错误：服务仍在返回旧版前端页面。"
       exit 1
     fi
     if [[ "$pool_code" == "404" ]]; then
       echo "错误：候选池 API 仍为 404，运行代码与 main 不一致。"
+      exit 1
+    fi
+    if [[ "$sources_code" == "404" ]]; then
+      echo "错误：候选源 API 仍为 404，运行代码与 main 不一致。"
       exit 1
     fi
     cat /tmp/proxyip-scanner-health.json
