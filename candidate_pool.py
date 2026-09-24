@@ -41,8 +41,8 @@ AVAILABLE_RECHECK_INTERVAL = max(RECHECK_INTERVAL, int(os.environ.get("CANDIDATE
 AUTO_RECHECK_LIMIT = max(100, min(5000, int(os.environ.get("CANDIDATE_AUTO_RECHECK_LIMIT", "500"))))
 FAILED_RETRY_BASE = max(6 * 3600, int(os.environ.get("CANDIDATE_FAILED_RETRY_BASE", str(24 * 3600))))
 STALE_RETENTION = max(24 * 3600, int(os.environ.get("CANDIDATE_STALE_RETENTION", str(14 * 24 * 3600))))
-# Quality lifecycle cleanup. Failed low-value candidates should not consume the
-# long-running pool capacity forever, while verified candidates are protected.
+# Quality lifecycle cleanup. Failed low-value candidates should not remain forever;
+# candidate count itself is not capped per region.
 MIN_KEEP_SCORE = max(0, min(100, int(os.environ.get("CANDIDATE_MIN_KEEP_SCORE", "20"))))
 MIN_KEEP_CHECKS = max(1, int(os.environ.get("CANDIDATE_MIN_KEEP_CHECKS", "3")))
 MAX_CONSECUTIVE_FAILURES = max(1, int(os.environ.get("CANDIDATE_MAX_CONSECUTIVE_FAILURES", "8")))
@@ -837,8 +837,7 @@ async def _load_custom_source(row: dict) -> List[str]:
 async def _region_sources(region: str) -> List[dict]:
     work = []
     if ENABLE_XIAOBEI:
-        # Keep the higher-value subsets first so the per-region cap favors
-        # fast and residential/mobile candidates before the wider raw pool.
+        # Keep higher-value subsets first for source ordering and statistics.
         work.extend([
             _run_source(f"Xiaobei 高速优选 {region}", region, lambda region=region: _fetch_xiaobei_fast(region)),
             _run_source(f"Xiaobei 家宽/移动 {region}", region, lambda region=region: _fetch_xiaobei_residential(region)),
