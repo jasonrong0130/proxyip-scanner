@@ -36,7 +36,15 @@ jobs:
           node --check /tmp/index.js
           node --check /tmp/candidates.js
       - name: Import application
-        run: PROXY_SCANNER_DATA_DIR=/tmp/proxyip-scanner-ci ADMIN_PASSWORD_HASH=x SESSION_SECRET=x python -c "import app; print(app.APP_NAME, app.APP_VERSION)"
+        run: |
+          PROXY_SCANNER_DATA_DIR=/tmp/proxyip-scanner-ci ADMIN_PASSWORD_HASH=x SESSION_SECRET=x python - <<'PY'
+          import app
+          paths = {getattr(route, "path", "") for route in app.app.routes}
+          required = {"/api/candidate-pool", "/api/candidate-sources", "/api/candidate-regions"}
+          missing = sorted(required - paths)
+          assert not missing, f"missing candidate routes: {missing}"
+          print(app.APP_NAME, app.APP_VERSION, "candidate routes ok")
+          PY
       - name: Run lifecycle tests
         run: PROXY_SCANNER_DATA_DIR=/tmp/proxyip-scanner-tests ADMIN_PASSWORD_HASH=x SESSION_SECRET=x python -m unittest discover -s tests -v
       - name: Validate annotated ProxyIP imports
